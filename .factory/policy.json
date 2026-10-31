@@ -1,0 +1,84 @@
+{
+	"rules": [
+		{
+			"pattern": "README.md",
+			"risk": "low",
+			"reason": "Documentation"
+		},
+		{
+			"pattern": "docs/**",
+			"risk": "low",
+			"reason": "Documentation"
+		},
+		{
+			"pattern": "tests/**",
+			"risk": "low",
+			"reason": "Tests only"
+		},
+		{
+			"pattern": "src/**/*.test.ts",
+			"risk": "low",
+			"reason": "Tests only"
+		},
+		{
+			"pattern": "src/lib/components/**",
+			"risk": "low",
+			"reason": "UI"
+		},
+		{
+			"pattern": "src/routes/**",
+			"risk": "low",
+			"reason": "UI"
+		},
+		{
+			"pattern": "src/lib/notes/**",
+			"risk": "medium",
+			"reason": "Storage and data model: a bug can lose user notes"
+		},
+		{
+			"pattern": "src/lib/markdown/**",
+			"risk": "medium",
+			"reason": "HTML sanitization: XSS surface"
+		},
+		{
+			"pattern": "package.json",
+			"risk": "medium",
+			"reason": "Dependencies / supply chain"
+		},
+		{
+			"pattern": "pnpm-lock.yaml",
+			"risk": "medium",
+			"reason": "Dependencies / supply chain"
+		},
+		{
+			"pattern": "vite.config.*",
+			"risk": "medium",
+			"reason": "Build, PWA and caching behavior"
+		},
+		{
+			"pattern": "svelte.config.*",
+			"risk": "medium",
+			"reason": "Build, PWA and caching behavior"
+		},
+		{
+			"pattern": "src/service-worker.*",
+			"risk": "medium",
+			"reason": "Build, PWA and caching behavior"
+		},
+		{
+			"pattern": "static/manifest*",
+			"risk": "medium",
+			"reason": "Build, PWA and caching behavior"
+		},
+		{
+			"pattern": ".github/**",
+			"risk": "high",
+			"reason": "CI and automation"
+		},
+		{
+			"pattern": ".factory/**",
+			"risk": "high",
+			"reason": "Factory metadata (never low, enforced by the factory anyway)"
+		}
+	]
+}
