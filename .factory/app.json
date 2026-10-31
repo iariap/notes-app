@@ -1,8 +1,8 @@
 {
-  "id": "notes-app",
-  "aliases": ["notes"],
-  "branch": "main",
-  "ci": { "provider": "github" },
-  "environments": {},
-  "description": "Notes App: browser-only notes (SvelteKit + Svelte 5 + shadcn-svelte SPA, IndexedDB storage, Markdown live preview, PWA). Runs locally only; no deployed environments."
+	"id": "notes-app",
+	"aliases": ["notes"],
+	"branch": "main",
+	"ci": { "provider": "github" },
+	"environments": {},
+	"description": "Notes App: browser-only notes (SvelteKit + Svelte 5 + shadcn-svelte SPA, IndexedDB storage, Markdown live preview, PWA). Runs locally only; no deployed environments."
 }
