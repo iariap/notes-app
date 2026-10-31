@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Notes">
+	<rect width="512" height="512" fill="#171717" />
+	<g fill="#ffffff">
+		<path d="M152 112h208a28 28 0 0 1 28 28v232a28 28 0 0 1-28 28H152a28 28 0 0 1-28-28V140a28 28 0 0 1 28-28z" />
+	</g>
+	<g fill="#171717">
+		<rect x="176" y="184" width="160" height="20" rx="10" />
+		<rect x="176" y="240" width="160" height="20" rx="10" />
+		<rect x="176" y="296" width="96" height="20" rx="10" />
+	</g>
+</svg>

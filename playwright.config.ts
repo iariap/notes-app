@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = 4173;
+const PORT = Number(process.env.E2E_PORT ?? 4173);
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
@@ -33,9 +33,12 @@ export default defineConfig({
 		}
 	],
 	webServer: {
-		command: 'pnpm build && pnpm preview --port 4173 --strictPort',
+		command: `pnpm build && pnpm preview --port ${PORT}`,
 		url: BASE_URL,
-		reuseExistingServer: !process.env.CI,
+		// `E2E_PORT` exists so parallel worktrees do not fight over one port: two
+		// agents running the suite reused each other's preview server and tested
+		// the wrong build. With a fixed port, reuse only when explicitly allowed.
+		reuseExistingServer: !process.env.CI && process.env.E2E_PORT === undefined,
 		timeout: 180_000
 	}
 });
