@@ -5,8 +5,9 @@
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Tooltip, TooltipContent, TooltipProvider } from '$lib/components/ui/tooltip/index.js';
-	import { NotesStore, type NotesStatus } from '$lib/notes/notes.svelte';
+	import type { NotesStore, NotesStatus } from '$lib/notes/notes.svelte';
 	import { derivePreview } from '$lib/notes/preview';
+	import { getNotesStore } from '$lib/notes/store-context';
 	import { deriveTitle } from '$lib/notes/title';
 	import type { Note } from '$lib/notes/types';
 	import NoteListRow from './NoteListRow.svelte';
@@ -18,9 +19,11 @@
 	 * #4 — the component never reads storage itself and never mutates it, so
 	 * there is nothing here that can delete or overwrite a note.
 	 *
-	 * `store` is optional so a caller that already has one (the editor route in
-	 * #7) can share it; when it is omitted the list owns its own store and
-	 * disposes it on unmount.
+	 * The store comes from the layout's context: the list and the editor are on
+	 * screen together from `md` up and must be the same instance, or a save in
+	 * the editor would not move the row next to it. The `store` prop exists for
+	 * tests and stays first in precedence; when neither is given, or the caller
+	 * supplies one, the list never disposes it (the owner does).
 	 */
 	type Props = {
 		store?: NotesStore;
@@ -29,21 +32,13 @@
 
 	let { store, activeNoteId = null }: Props = $props();
 
-	// The store is created once, from the props as they were on mount: a caller
-	// that wants a different store remounts the list rather than swapping it.
-	const owned = untrack(() => store ?? new NotesStore());
-	const ownsStore = untrack(() => store === undefined);
+	const activeStore = untrack(() => store ?? getNotesStore());
 
 	$effect(() => {
 		// Loading here (not in the caller) keeps the list correct wherever it is
-		// mounted, including a shared store: `load()` is idempotent, and the store
-		// itself drops a slow result that a newer write superseded.
-		void owned.load();
-		if (!ownsStore) return;
-		return () => {
-			owned.dispose();
-			void owned.repository.close();
-		};
+		// mounted: `load()` is idempotent, and the store itself drops a slow
+		// result that a newer write superseded.
+		void activeStore.load();
 	});
 
 	/**
@@ -71,9 +66,9 @@
 		};
 	});
 
-	const status = $derived<NotesStatus>(owned.status);
-	const error = $derived<Error | null>(owned.error);
-	const notes = $derived<Note[]>(owned.notes);
+	const status = $derived<NotesStatus>(activeStore.status);
+	const error = $derived<Error | null>(activeStore.error);
+	const notes = $derived<Note[]>(activeStore.notes);
 
 	/**
 	 * Title and preview are derived once per note, not on every render: the
@@ -105,7 +100,14 @@
 </script>
 
 <div data-slot="note-list" class="flex min-w-0 flex-col p-2">
-	{#if status === 'error' && error}
+	<!--
+		The store reports a failed *write* (a full disk, say) in the same `error`
+		field it uses for a failed read, and an open editor already shows that
+		failure next to the text it kept. Replacing a loaded list with "Couldn't
+		load your notes" would then be a lie, so the alert belongs to the case
+		where there is nothing to show.
+	-->
+	{#if status === 'error' && error && notes.length === 0}
 		<Alert data-testid="note-list-error">
 			<AlertTitle>Couldn&rsquo;t load your notes</AlertTitle>
 			<AlertDescription>{error.message}</AlertDescription>

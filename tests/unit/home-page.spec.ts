@@ -1,16 +1,40 @@
 import { render, screen } from '@testing-library/svelte';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import Page from '../../src/routes/+page.svelte';
+import { NotesStore } from '$lib/notes/notes.svelte';
+import { notesStoreContext } from '$lib/notes/store-context';
+import type { NotesSync } from '$lib/notes/sync';
 
 /**
- * The list reads storage on mount (`NotesStore.load()`), so every render needs
- * a fresh in-memory IndexedDB: a shared one would carry notes between tests.
+ * The list route, mounted without the layout — so it gets the store the layout
+ * would have provided, injected as Svelte context. That is the same key the app
+ * uses; a second instance here would defeat the point of the shared store.
  */
-function renderHome() {
+const silentSync = (): NotesSync => ({
+	post() {},
+	onRemoteChange: () => () => {},
+	close() {}
+});
+
+let store: NotesStore | undefined;
+
+beforeEach(() => {
 	globalThis.indexedDB = new IDBFactory();
-	return render(Page);
+	const created = new NotesStore({ sync: silentSync() });
+	store = created;
+});
+
+afterEach(async () => {
+	store?.dispose();
+	await store?.repository.close();
+	store = undefined;
+});
+
+function renderHome() {
+	if (!store) throw new Error('store not initialised');
+	return render(Page, { context: notesStoreContext(store) });
 }
 
 describe('home page', () => {
