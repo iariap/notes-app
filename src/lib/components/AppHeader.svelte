@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+	import SquarePenIcon from '@lucide/svelte/icons/square-pen';
 	import type { Snippet } from 'svelte';
 
 	/**
-	 * App header: the "Notes" title, the mobile back affordance and a right-hand
-	 * region for page actions. The back link is hidden from `md` up, where the
-	 * list sidebar replaces it as the way back.
+	 * App header: the "Notes" title, the mobile back affordance, the "New note"
+	 * entry point and a right-hand region for page actions. The back link is
+	 * hidden from `md` up, where the list sidebar replaces it as the way back.
 	 */
 	type Props = {
 		showBack?: boolean;
@@ -44,5 +45,19 @@
 
 	<div class="ml-auto flex items-center gap-1">
 		{@render actions?.()}
+		<!--
+			Always the same accessible name ("New note"); only the visible label
+			changes with the breakpoint. `min-h-11 min-w-11` keep the 44×44 target
+			on phones, where the action is icon-only.
+		-->
+		<a
+			href={resolve('/notes/new')}
+			aria-label="New note"
+			data-testid="new-note"
+			class="inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-medium transition-colors outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring md:px-3"
+		>
+			<SquarePenIcon aria-hidden="true" class="size-5 shrink-0" />
+			<span class="hidden md:inline">New note</span>
+		</a>
 	</div>
 </header>

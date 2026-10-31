@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import { seedNote, seedNotes } from './helpers/seed';
 
 const LIST = '[data-pane="list"]';
 const EDITOR = '[data-pane="editor"]';
@@ -61,7 +62,10 @@ test.describe('app shell panes', () => {
 		page
 	}, testInfo) => {
 		const wide = (page.viewportSize()?.width ?? 0) >= 768;
-		await page.goto('/notes/some-id');
+		// The list is storage-backed since #6, so the "current" highlight needs a
+		// note that actually exists.
+		const [note] = await seedNotes(page, [seedNote(1, 'Current note', new Date().toISOString())]);
+		await page.goto(`/notes/${note.id}`);
 		await hydration(page);
 
 		expect(await paneVisible(page, EDITOR)).toBe(true);
