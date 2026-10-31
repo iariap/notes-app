@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
-import { seedNote, seedNotes } from './helpers/seed';
+import { rows, seedNote, seedNotes, waitForList } from './helpers/seed';
 
 const LIST = '[data-pane="list"]';
 const EDITOR = '[data-pane="editor"]';
@@ -168,30 +168,78 @@ test.describe('layout invariants', () => {
 		// the tab order: the assertion is about the two-pane layout.
 		test.skip((page.viewportSize()?.width ?? 0) < 768, 'two-pane layout only');
 
+		// The note has to exist: `activeNoteId` only highlights a row that the
+		// storage-backed list actually loads.
+		await seedNotes(page, [seedNote(1, 'A note to focus', new Date().toISOString())]);
+
 		await page.goto('/notes/some-id');
 		await hydration(page);
+		// Hydration only proves the shell is mounted. The list is storage-backed
+		// and async, so at this instant it still draws its skeleton — a `<ul>`
+		// marked `aria-hidden` with no focusable row in it. Tabbing here used to
+		// run through the whole page before the rows arrived (the race that made
+		// this test flaky under load) and the first stops never reached the list.
+		// Wait for the list's settled, focusable state instead of for the shell.
+		await waitForList(page);
+		await expect(rows(page).first()).toBeVisible();
 
-		const zoneOf = () =>
-			page.evaluate(() => {
-				const active = document.activeElement as HTMLElement | null;
-				if (!active) return 'none';
-				if (active.dataset.testid === 'skip-link') return 'skip';
-				if (active.closest('header')) return 'header';
-				if (active.closest('[data-pane="list"]')) return 'list';
-				if (active.closest('[data-pane="editor"]')) return 'editor';
-				return 'other';
-			});
+		/**
+		 * Which region owns focus, plus whether the stop is a note row. The row
+		 * flag is what `list` ultimately has to mean, so the walk below can stop
+		 * there even when a sibling branch adds another focusable element inside
+		 * the same pane.
+		 */
+		const focusState = () =>
+			page.evaluate(
+				({ list, editor }) => {
+					const active = document.activeElement as HTMLElement | null;
+					if (!active) return { zone: 'none', isRow: false };
+					const isRow = active.closest('[data-slot="note-row"]') !== null;
+					if (active.dataset.testid === 'skip-link') return { zone: 'skip', isRow };
+					if (active.closest('header')) return { zone: 'header', isRow };
+					if (active.closest(list)) return { zone: 'list', isRow };
+					if (active.closest(editor)) return { zone: 'editor', isRow };
+					return { zone: 'other', isRow };
+				},
+				{ list: LIST, editor: EDITOR }
+			);
 
+		// Bound the walk by the number of tab stops the page actually has, not a
+		// hard-coded count: a branch that adds a control (e.g. #10's storage
+		// notice, one more stop between the header and the list) changes how many
+		// presses it takes, never whether the order is right.
+		const tabStops = await page.evaluate(() => {
+			const selector = 'a[href], button, input, select, textarea, [tabindex]';
+			return [...document.querySelectorAll<HTMLElement>(selector)].filter(
+				(element) => element.tabIndex >= 0
+			).length;
+		});
+		expect(tabStops).toBeGreaterThan(0);
+
+		// Walk the real tab order until focus lands on a note row, keeping only
+		// the zones this test names and collapsing repeats: the assertion is
+		// about the order of the named regions, not about how many focusable
+		// elements each one happens to contain, and not about unrelated chrome a
+		// sibling branch may add (an unknown stop is skipped here, and a notice
+		// inside the list pane is still `list` on the way to a row).
 		const order: string[] = [];
-		for (let i = 0; i < 8; i += 1) {
+		for (let press = 0; press <= tabStops; press += 1) {
 			await page.keyboard.press('Tab');
-			order.push(await zoneOf());
+			const { zone, isRow } = await focusState();
+			if (zone !== 'other' && zone !== 'none') order.push(zone);
+			if (isRow) break;
 		}
 
-		// Collapse repeats so the assertion is about order, not about how many
-		// focusable elements each zone happens to contain.
 		const sequence = order.filter((zone, index) => zone !== order[index - 1]);
+		expect(sequence).toContain('list');
+		// Order, not just reachability: the skip link comes before the header,
+		// the header before the list, and the editor pane is never on the way.
 		expect(sequence.slice(0, 3)).toEqual(['skip', 'header', 'list']);
+		expect(sequence).not.toContain('editor');
+
+		// And the stop that received focus really is a row — the list's own tab
+		// stop — not the skeleton, and not some other element inside the pane.
+		await expect(rows(page).first()).toBeFocused();
 	});
 });
 
