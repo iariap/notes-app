@@ -74,14 +74,15 @@ test.describe('offline', () => {
 
 		await hydration(page);
 		await expect(page.getByRole('heading', { level: 1, name: 'Notes' })).toBeVisible();
-		// The shell routed to the editor pane with the id from the URL.
-		await expect(page.getByText('some-id')).toBeVisible();
+		// The shell routed to the editor pane with the id from the URL, which is
+		// not stored: the editor says so instead of rendering a blank box.
+		await expect(page.getByTestId('editor-missing')).toBeVisible();
 
 		// A reload of that deep link offline keeps working too.
 		await page.reload();
 		await hydration(page);
 		await expect(page.getByRole('heading', { level: 1, name: 'Notes' })).toBeVisible();
-		await expect(page.getByText('some-id')).toBeVisible();
+		await expect(page.getByTestId('editor-missing')).toBeVisible();
 	});
 
 	test('the notice dismissal survives a reload with the network off', async ({ page, context }) => {

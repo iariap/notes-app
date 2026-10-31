@@ -102,9 +102,13 @@ test.describe('app shell panes', () => {
 
 		expect(await paneVisible(page, EDITOR)).toBe(true);
 		expect(await paneVisible(page, LIST)).toBe(wide);
-		// The static segment wins over `/notes/[id]`: the editor reports "no id"
-		// rather than an id of "new".
-		await expect(page.getByText('(new note)')).toBeVisible();
+		// The static segment wins over `/notes/[id]`: this is an empty editor with
+		// no id, not a note whose id is "new".
+		const body = page.getByRole('textbox', { name: 'Note' });
+		await expect(body).toBeVisible();
+		await expect(body).toHaveValue('');
+		// A new note is focused on mount so typing can start immediately.
+		await expect(body).toBeFocused();
 		// A not-yet-existing note is not in the list, so nothing is current.
 		await expect(page.locator('[aria-current="page"]')).toHaveCount(0);
 	});

@@ -18,6 +18,6 @@
 	{/snippet}
 
 	{#snippet editor()}
-		<EditorPlaceholder mode="empty" />
+		<EditorPlaceholder />
 	{/snippet}
 </AppShell>

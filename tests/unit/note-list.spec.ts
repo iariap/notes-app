@@ -1,12 +1,13 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/svelte';
+import { flushSync } from 'svelte';
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import NoteList from '../../src/lib/components/NoteList.svelte';
 import { NotesStore } from '$lib/notes/notes.svelte';
 import { createNotesRepository, type NotesRepository } from '$lib/notes/repository';
 import type { NotesSync } from '$lib/notes/sync';
-import { StorageUnavailableError } from '$lib/notes/types';
+import { StorageFullError, StorageUnavailableError } from '$lib/notes/types';
 import { failingWith } from './helpers/failing-idb';
 import { throwingOpenFactory } from './helpers/open-failures';
 
@@ -129,6 +130,25 @@ describe('error state', () => {
 
 		const alert = await screen.findByTestId('note-list-error');
 		expect(alert.textContent).toContain('Storage is full');
+	});
+
+	it('keeps showing the loaded notes when a later write fails', async () => {
+		// A failed save must not replace a list that did load: the open editor
+		// owns that failure (and the text it kept), and "Couldn't load your
+		// notes" here would be false.
+		store = steppingStore();
+		const created = await store.createNote('Visible and loaded');
+		render(NoteList, { props: { store } });
+		await screen.findByText('Visible and loaded');
+
+		const failing = vi.spyOn(store, 'updateNote').mockRejectedValueOnce(new StorageFullError());
+		await expect(store.updateNote(created.id, 'too big')).rejects.toBeInstanceOf(StorageFullError);
+		failing.mockRestore();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		flushSync();
+
+		expect(screen.queryByTestId('note-list-error')).toBeNull();
+		expect(screen.getByText('Visible and loaded')).toBeInTheDocument();
 	});
 
 	it('does not render an alert when the store is healthy', async () => {
