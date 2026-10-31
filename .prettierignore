@@ -1,0 +1,16 @@
+# Package managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Generated / non-source
+/.svelte-kit
+/build
+/dist
+/static/
+/playwright-report
+/test-results
+
+# Docs assets are committed intentionally (screenshots), nothing else to ignore there.

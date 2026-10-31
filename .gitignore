@@ -1,0 +1,25 @@
+node_modules
+
+# Build output
+/.svelte-kit
+/build
+/dist
+
+# Local env files (.env*, plus a tracked example)
+.env
+.env.*
+!.env.example
+
+# Tests
+/test-results
+/playwright-report
+/blob-report
+/coverage
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# OS / editor
+.DS_Store
+Thumbs.db
