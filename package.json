@@ -10,7 +10,7 @@
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
-		"preview": "vite preview",
+		"preview": "node scripts/preview.mjs",
 		"prepare": "svelte-kit sync || echo ''",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
@@ -18,7 +18,8 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"test:e2e": "playwright test"
+		"test:e2e": "playwright test",
+		"generate:icons": "pwa-assets-generator"
 	},
 	"devDependencies": {
 		"@axe-core/playwright": "^4.14.0",
@@ -36,6 +37,8 @@
 		"@testing-library/jest-dom": "^7.0.1",
 		"@testing-library/svelte": "^5.4.2",
 		"@types/node": "^26",
+		"@vite-pwa/assets-generator": "^1.0.4",
+		"@vite-pwa/sveltekit": "^1.1.0",
 		"@vitest/coverage-v8": "^4.1.12",
 		"bits-ui": "^2.20.0",
 		"cn": "^0.5.1",
@@ -59,7 +62,9 @@
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.60.1",
 		"vite": "^8.0.16",
-		"vitest": "^4.1.8"
+		"vite-plugin-pwa": "^1.3.0",
+		"vitest": "^4.1.8",
+		"workbox-window": "^7.4.1"
 	},
 	"dependencies": {
 		"idb": "^8.0.4"
