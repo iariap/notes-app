@@ -1,7 +1,7 @@
 <script lang="ts">
 	import AppShell from '$lib/components/AppShell.svelte';
 	import EditorPlaceholder from '$lib/components/EditorPlaceholder.svelte';
-	import NoteListPlaceholder from '$lib/components/NoteListPlaceholder.svelte';
+	import NoteList from '$lib/components/NoteList.svelte';
 </script>
 
 <svelte:head>
@@ -14,7 +14,7 @@
 
 <AppShell mobilePane="list">
 	{#snippet list()}
-		<NoteListPlaceholder />
+		<NoteList />
 	{/snippet}
 
 	{#snippet editor()}

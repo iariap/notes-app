@@ -2,7 +2,7 @@
 	import { page } from '$app/state';
 	import AppShell from '$lib/components/AppShell.svelte';
 	import EditorPlaceholder from '$lib/components/EditorPlaceholder.svelte';
-	import NoteListPlaceholder from '$lib/components/NoteListPlaceholder.svelte';
+	import NoteList from '$lib/components/NoteList.svelte';
 
 	const noteId = $derived(page.params.id ?? null);
 </script>
@@ -13,7 +13,7 @@
 
 <AppShell mobilePane="editor">
 	{#snippet list()}
-		<NoteListPlaceholder activeNoteId={noteId} />
+		<NoteList activeNoteId={noteId} />
 	{/snippet}
 
 	{#snippet editor()}
