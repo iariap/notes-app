@@ -67,6 +67,8 @@
 		"workbox-window": "^7.4.1"
 	},
 	"dependencies": {
-		"idb": "^8.0.4"
+		"dompurify": "^3.4.17",
+		"idb": "^8.0.4",
+		"marked": "^18.1.2"
 	}
 }

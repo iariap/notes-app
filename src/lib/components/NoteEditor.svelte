@@ -4,10 +4,14 @@
 	import { resolve } from '$app/paths';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import { tick, untrack } from 'svelte';
+	import { cn } from '$lib/utils.js';
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs/index.js';
 	import { Textarea } from '$lib/components/ui/textarea/index.js';
 	import { focusAfterRemoval } from '$lib/components/notes-focus';
+	import MarkdownPreview from '$lib/components/MarkdownPreview.svelte';
+	import { renderMarkdown } from '$lib/markdown/render';
 	import { NoteAutosave } from '$lib/notes/autosave.svelte';
 	import { formatFullDate } from '$lib/notes/date';
 	import { deleteNoteWithUndo, wasDeletedInThisTab } from '$lib/notes/delete-undo';
@@ -420,6 +424,108 @@
 	const isBusy = $derived(autosave.status === 'pending' || autosave.status === 'saving');
 	const statusText = $derived(isBusy ? 'Saving…' : autosave.status === 'saved' ? 'Saved' : '');
 	const saveError = $derived(autosave.status === 'error' ? autosave.error : null);
+
+	// --- live preview (#9) ---------------------------------------------------
+
+	/**
+	 * How long a keystroke waits before the preview re-renders.
+	 *
+	 * Shorter than autosave's 500 ms on purpose: the preview is what the user is
+	 * looking at, so it should settle as they pause, while storage can afford to
+	 * wait for a longer lull. The two timers are independent — this one never
+	 * writes and autosave never renders — so neither can delay or cancel the
+	 * other, and there is no path where a keystroke causes two renders.
+	 */
+	const PREVIEW_DEBOUNCE_MS = 120;
+
+	/** The text the preview has rendered; lags `body` by at most one debounce. */
+	let previewSource = $state('');
+	let previewTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/** The HTML handed to the preview. Derived, so rendering is not in the keystroke path. */
+	const previewHtml = $derived(renderMarkdown(previewSource));
+
+	/**
+	 * The whole debounce, in one effect that only **reads** `body`.
+	 *
+	 * This is deliberately a separate effect rather than a call inside `oninput`,
+	 * the load effect or the remote-adopt path. Those all *write* `body`, so a
+	 * helper there would read a value it writes: Svelte then treats the effect as
+	 * self-dependent, and the re-run cascade makes the whole route misbehave
+	 * (found the hard way — the list never left its skeleton). Reading in its own
+	 * effect keeps the dependency one-directional: text changes → preview
+	 * follows, never the reverse.
+	 *
+	 * The cleanup clears the pending timer, so the debounce cannot outlive the
+	 * component or fire against a note the user has already left.
+	 */
+	$effect(() => {
+		const source = body;
+		if (previewTimer !== null) clearTimeout(previewTimer);
+		previewTimer = setTimeout(() => {
+			previewTimer = null;
+			previewSource = source;
+		}, PREVIEW_DEBOUNCE_MS);
+		return () => {
+			if (previewTimer !== null) {
+				clearTimeout(previewTimer);
+				previewTimer = null;
+			}
+		};
+	});
+
+	/**
+	 * Which view is showing below `xl`, remembered for the session (#9).
+	 *
+	 * A plain `sessionStorage` read/write, independent of the notes store and of
+	 * `localStorage`: the choice is a view preference, not data, and it must not
+	 * outlive the tab. A browser that refuses storage (private mode) simply gets
+	 * the default, so a failed write can never break the editor.
+	 */
+	const VIEW_STORAGE_KEY = 'notes.editor.view';
+	type EditorView = 'edit' | 'preview';
+
+	function readView(): EditorView {
+		try {
+			return globalThis.sessionStorage?.getItem(VIEW_STORAGE_KEY) === 'preview'
+				? 'preview'
+				: 'edit';
+		} catch {
+			return 'edit';
+		}
+	}
+
+	let view = $state<EditorView>(untrack(readView));
+
+	/**
+	 * Renders what is on screen right now, skipping the debounce.
+	 *
+	 * Called **only from event handlers** (a tab switch). Reading `body` here is
+	 * safe precisely because no effect calls this: an effect that both wrote
+	 * `body` and read it through a helper becomes self-dependent, and Svelte
+	 * re-runs it until the update-depth limit — which is how the preview broke the
+	 * whole editor the first time. The debounce effect above reads `body` itself
+	 * and is the only reactive path to `previewSource`.
+	 */
+	function flushPreview(): void {
+		if (previewTimer !== null) {
+			clearTimeout(previewTimer);
+			previewTimer = null;
+		}
+		previewSource = body;
+	}
+
+	function selectView(next: string): void {
+		view = next === 'preview' ? 'preview' : 'edit';
+		try {
+			globalThis.sessionStorage?.setItem(VIEW_STORAGE_KEY, view);
+		} catch {
+			// Best effort: the choice is a convenience, not a feature that can fail.
+		}
+		// Switching to Preview shows what is on screen right now, not whatever the
+		// debounce last managed to render.
+		if (view === 'preview') flushPreview();
+	}
 </script>
 
 {#if phase === 'loading'}
@@ -445,17 +551,38 @@
 		>
 	</div>
 {:else}
-	<div
-		class="flex min-h-full min-w-0 flex-col"
+	<Tabs
+		value={view}
+		onValueChange={selectView}
+		class="flex min-h-full min-w-0 flex-col gap-0"
 		data-slot="note-editor"
 		data-note-id={currentId ?? ''}
 	>
 		<header class="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-1.5">
 			<!--
-				#9 EDIT / PREVIEW TAB SLOT — the Edit/Preview tabs (and the ≥xl
-				side-by-side preview) mount here. Deliberately empty in #7.
+				#9 EDIT / PREVIEW TABS. Below `xl` these pick the single visible pane;
+				at `xl` and up both panes are on screen and the tabs are hidden, so the
+				control never describes a choice the layout has already made. The
+				placeholder #7 left here is gone.
 			-->
-			<div class="hidden" data-placeholder-for="9-view-tabs" aria-hidden="true"></div>
+			<div class="xl:hidden" data-testid="editor-view-tabs">
+				<TabsList aria-label="Editor view">
+					<TabsTrigger
+						id="view-tab-edit"
+						value="edit"
+						aria-controls="editor-edit-pane"
+						class="min-h-9 px-3"
+						data-testid="view-tab-edit">Edit</TabsTrigger
+					>
+					<TabsTrigger
+						id="view-tab-preview"
+						value="preview"
+						aria-controls="editor-preview-pane"
+						class="min-h-9 px-3"
+						data-testid="view-tab-preview">Preview</TabsTrigger
+					>
+				</TabsList>
+			</div>
 
 			{#if createdLabel}
 				<p class="text-xs text-muted-foreground" data-testid="editor-created-date">
@@ -512,17 +639,82 @@
 			</div>
 		{/if}
 
-		<div class="flex min-h-0 flex-1 flex-col px-4 pt-3 pb-4">
-			<label for="note-body" class="sr-only">Note</label>
-			<Textarea
-				id="note-body"
-				bind:ref={textarea}
-				value={body}
-				{oninput}
-				{onkeydown}
-				data-testid="note-body"
-				class="min-h-full flex-1 resize-none border-0 bg-transparent px-0 py-0 font-mono text-base shadow-none focus-visible:ring-2 md:text-sm"
-			/>
+		<!--
+			Two panes, and the layout rules of epic #1 stated in CSS alone.
+
+			`TabsContent` is deliberately *not* used here. bits-ui sets a `hidden`
+			attribute on the inactive panel, and Tailwind's preflight makes that
+			authoritative (`[hidden] { display: none !important }`), so no utility —
+			not even `xl:flex` — can bring the panel back at `xl`; the `hidden`
+			attribute outranks the class. That was measured, not assumed: the panel
+			stayed hidden at 1280 px with `xl:flex!`.
+
+			So the panes are plain elements and the two rules are expressed as
+			classes:
+
+			- below `xl`, exactly one pane shows: the editor when Edit is selected,
+			  the preview when Preview is;
+			- at `xl` and up, both show — the editor's `xl:flex` and the preview's
+			  `xl:block` override their own `hidden`, and the selection no longer
+			  decides anything.
+
+			Both panes stay mounted at every width, which is what keeps the
+			textarea, its focus and its caret intact when switching tabs, and what
+			keeps the preview from re-rendering on a resize.
+
+			Tab semantics: the two triggers are a real tablist and the panes carry
+			`role="tabpanel"` with matching `id`/`aria-labelledby`. Below `xl` they
+			are exactly a tab interface; at `xl` the tablist is hidden because the
+			layout has already shown both, and the panels remain a truthful pair of
+			labelled regions rather than a control the reader cannot reach.
+		-->
+		<!--
+			The pane row. Below `xl` the panes stack, which is moot because only one
+			is visible; at `xl` they sit side by side 50/50, each scrolling inside
+			its own box, and the preview is separated by a border.
+		-->
+		<div class="flex min-h-0 flex-1 flex-col xl:flex-row">
+			<div
+				id="editor-edit-pane"
+				role="tabpanel"
+				aria-labelledby="view-tab-edit"
+				class={cn(
+					'min-h-0 min-w-0 flex-[1_1_0%] flex-col xl:flex',
+					view === 'edit' ? 'flex' : 'hidden'
+				)}
+				data-testid="edit-pane"
+			>
+				<div class="flex min-h-0 flex-1 flex-col px-4 pt-3 pb-4">
+					<label for="note-body" class="sr-only">Note</label>
+					<Textarea
+						id="note-body"
+						bind:ref={textarea}
+						value={body}
+						{oninput}
+						{onkeydown}
+						data-testid="note-body"
+						class="min-h-full flex-1 resize-none border-0 bg-transparent px-0 py-0 font-mono text-base shadow-none focus-visible:ring-2 md:text-sm"
+					/>
+				</div>
+			</div>
+			<div
+				id="editor-preview-pane"
+				role="tabpanel"
+				aria-labelledby="view-tab-preview"
+				class={cn(
+					'min-h-0 min-w-0 flex-[1_1_0%] flex-col overflow-y-auto px-4 pt-3 pb-4 xl:flex xl:border-l xl:border-border',
+					view === 'preview' ? 'flex' : 'hidden'
+				)}
+				data-testid="preview-pane"
+			>
+				{#if previewSource.trim().length > 0}
+					<MarkdownPreview html={previewHtml} />
+				{:else}
+					<p class="text-sm text-muted-foreground" data-testid="preview-empty">
+						Nothing to preview
+					</p>
+				{/if}
+			</div>
 		</div>
-	</div>
+	</Tabs>
 {/if}

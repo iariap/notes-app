@@ -604,20 +604,22 @@ describe('keyboard', () => {
 });
 
 describe('marked slots for later issues', () => {
-	it('fills the Delete slot (#8) and leaves the view tabs slot (#9) empty', async () => {
+	it('fills both slots: the Delete button (#8) and the view tabs (#9)', async () => {
 		const id = await seed('slot host');
 		const { container } = renderEditor({ noteId: id });
 		await until(() => screen.queryByRole('textbox', { name: 'Note' }) !== null, 'textarea');
 
-		// #8 replaced its placeholder with the real control; #9's is still a
-		// placeholder, so it can mount its tabs without touching this issue's work.
+		// Every placeholder #7 left behind is gone, replaced by the real control:
+		// #8 filled its Delete slot and #9 filled the view tabs slot.
 		expect(container.querySelector('[data-placeholder-for="8-delete"]')).toBeNull();
-		expect(container.querySelector('[data-placeholder-for="9-view-tabs"]')).not.toBeNull();
+		expect(container.querySelector('[data-placeholder-for="9-view-tabs"]')).toBeNull();
 		expect(screen.getByRole('button', { name: 'Delete note' })).toBeInTheDocument();
 
-		// And the preview is still #9's to build.
-		expect(screen.queryByRole('tablist')).toBeNull();
-		expect(screen.queryByRole('tab', { name: /preview/i })).toBeNull();
+		// And the preview #9 owed is here: Edit/Preview tabs, and both panes.
+		expect(screen.getByRole('tablist', { name: 'Editor view' })).toBeInTheDocument();
+		expect(screen.getByRole('tab', { name: 'Edit' })).toBeInTheDocument();
+		expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
+		expect(screen.getByTestId('preview-pane')).toBeInTheDocument();
 	});
 
 	it('offers no Save button: saving is automatic', async () => {
