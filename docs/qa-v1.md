@@ -54,20 +54,44 @@ with its reason at the call site.
 
 ### CI: what gates a merge
 
-`.github/workflows/ci.yml` has two jobs:
+Two workflow files, two jobs.
 
-- **`ci` — the gate.** Runs on **every PR and every push to `main`**: install,
-  lint, `svelte-check`, unit tests, build, then the Chromium matrix
-  (`pnpm test:e2e` → `desktop` + `tablet` + `mobile`).
-- **`e2e-full` — additional.** Runs on `main` (every push) and on PRs labelled
-  `full-e2e`. Installs Chromium + Firefox + WebKit and runs `pnpm test:e2e:full`
-  (all six projects).
+- **`ci` — the gate.** In `.github/workflows/ci.yml`. Runs on **every pull
+  request** (`opened`, `synchronize`, `reopened`) **and every push to `main`**:
+  install, lint, `svelte-check`, unit tests, build, then the Chromium matrix
+  (`pnpm test:e2e` → `desktop` + `tablet` + `mobile`). It has no `if:`, so it is
+  never skipped.
+- **`e2e-full` — additional.** In the same file. Runs on `main` (every push).
+  Installs Chromium + Firefox + WebKit and runs `pnpm test:e2e:full` (all six
+  projects).
 
-A `full-e2e` label **cannot be a required check**: labels are applied after the
-PR opens, so requiring that job would block every PR until someone labelled it.
-So the required status stays `ci`, which is a real, full Chromium matrix — the
-default job was deliberately _not_ made to skip. The full job is extra evidence,
-never a condition of merging by its absence.
+The full matrix also runs on a PR **when it is labelled `full-e2e`**, but from a
+separate workflow: `.github/workflows/e2e-full-on-label.yml`, check
+`e2e full matrix, labelled (chromium + firefox + webkit)`.
+
+Why a separate file, and not just `types: [..., labeled]` on `ci.yml`:
+
+- `labeled` fires for **every** label, so adding it to `ci.yml` would re-run the
+  ~5-minute gate for `bug`, `docs`, `p1`, ….
+- Suppressing that with an `if:` on the `ci` job would be unsafe, not merely
+  wasteful: a job skipped by `if:` reports the `skipped` conclusion, and **GitHub
+  branch protection counts a skipped required check as satisfied**. A label event
+  could then leave `ci` green on a commit whose real run was still running — or
+  had been cancelled by `cancel-in-progress`.
+- Keeping the trigger in its own workflow removes the risk rather than reasoning
+  about it: a label event produces **no `ci` check run at all**, and a workflow
+  that never triggers cannot satisfy a required check. It also has its own
+  concurrency group, so it cannot cancel an in-flight `ci`.
+
+Neither the label workflow nor `e2e-full` is — or can be — a required check: they
+fire on a label (or on `main`), so requiring them would block every PR until
+someone acted. **`ci` is the gate** and is a real, full Chromium matrix; the
+default job was deliberately _not_ made to skip. The extra engines are additional
+evidence, never a condition of merging by their absence.
+
+_This section previously claimed the label "runs on PRs labelled `full-e2e`"
+while `ci.yml` had no `labeled` trigger — the label produced no run at all. Fixed
+in the PR that added `.github/workflows/e2e-full-on-label.yml`._
 
 ### Measured durations (this machine, macOS arm64)
 
@@ -483,7 +507,18 @@ question automation cannot settle.
 9. **`full-e2e` is not a required check** (by design — see §1). If the owner
    wants the full matrix to gate merges, the mechanism has to be a scheduled or
    `main`-only gate, or a required check that runs cheaply on every PR; that is a
-   process decision for `#1`.
+   process decision for `#1`. Note the label workflow publishes a _differently
+   named_ check from `ci.yml`'s `main` job on purpose, so the two can never be
+   mistaken for one another.
+
+10. **The label trigger was broken and the docs said otherwise.** `ci.yml` had no
+    `labeled` in its `pull_request.types`, so applying `full-e2e` produced no run
+    at all (observed on PR #23: label applied, matrix job still `skipping` from the
+    original push). Fixed by moving the trigger to
+    `.github/workflows/e2e-full-on-label.yml`; see §1. **Unverified end to end:**
+    the fix only takes effect once the workflow file is on the PR's head — a
+    workflow added by a PR does not run for that PR's own label events. It needs
+    one real label event _after_ this lands to be confirmed live.
 
 ---
 
