@@ -51,6 +51,18 @@ async function storedNote(page: Page, id: string) {
 
 const isMobile = (page: Page) => (page.viewportSize()?.width ?? 0) < 768;
 
+/**
+ * Lets `count` animation frames pass on the page clock.
+ *
+ * The delete's focus hand-off retries on `requestAnimationFrame`, and with a
+ * fake clock installed those frames only run when the clock is advanced. This
+ * advances exactly the frames asked for — a bounded, exact number, so a steal
+ * that lands on frame 1 or 2 is observed here rather than being left to a
+ * `sleep` that would make the test slow and still timing-dependent.
+ */
+const animationFrames = (page: Page, count: number): Promise<void> =>
+	page.clock.runFor(Math.ceil((count * 1000) / 60));
+
 /** The Undo toast, by its text and its single action. */
 const deleteToast = (page: Page) =>
 	page.locator('[data-sonner-toast]').filter({ hasText: 'Note deleted' });
@@ -226,7 +238,16 @@ test.describe('undo', () => {
 		// Keyboard-reachable, and holding it holds the window open.
 		await undoButton(page).focus();
 		await expect(undoButton(page)).toBeFocused();
+		// Focus must *stay* there, not merely have arrived: the delete's own focus
+		// hand-off retries on animation frames, so a steal lands a frame or two
+		// after this one and taking focus out of the toast is what resumes and
+		// then closes the window. Waiting the frames out (not sleeping) is what
+		// makes that steal a failure of this assertion instead of a mystery at the
+		// end of the test.
+		await animationFrames(page, 3);
+		await expect(undoButton(page)).toBeFocused();
 		await page.clock.fastForward(30_000);
+		await expect(undoButton(page)).toBeFocused();
 		await expect(undoButton(page)).toBeVisible();
 
 		// Pressing it still restores the note.
