@@ -1,19 +1,62 @@
 name: CI
 
+# `labeled` is deliberately NOT in `types:`.
+#
+# It was missing before, which made "add the `full-e2e` label to run the full
+# matrix" a lie: with no `types:` GitHub only fires `opened`, `synchronize` and
+# `reopened`, so applying a label produced no run at all (reproduced on PR #23 —
+# the label was applied, and the only run was the original push, whose matrix job
+# stayed `skipping`).
+#
+# The fix is NOT to add `labeled` here. `labeled` fires for *every* label, so it
+# would also re-run the `ci` gate for `bug`, `docs`, etc. The alternative —
+# skipping `ci` when the label is unrelated — is unsafe: a job skipped by `if:`
+# reports the `skipped` conclusion, and branch protection counts a skipped
+# required check as satisfied. A label event could then leave `ci` "passing" on a
+# commit whose real run was still in flight (or had just been cancelled by
+# concurrency), which is exactly the ungated merge this file exists to prevent.
+#
+# So the label lives in its own workflow (`e2e-full-on-label.yml`). `ci` keeps
+# running on every code-bearing event and is never skipped, and a label event
+# creates no `ci` check run at all (a workflow that does not trigger records
+# nothing, which cannot satisfy a required check). It also cannot cancel an
+# in-flight `ci`, because that is a different workflow with a different
+# concurrency group. See the `e2e-full` comment below.
 on:
   pull_request:
+    # Stated explicitly rather than left to the default, so that adding a type
+    # here is a visible decision instead of a silent one.
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
 
+# Concurrency: one in-flight run per workflow per ref.
+#
+# Scoped to this workflow, so the label workflow (a different `github.workflow`,
+# its own group) can never cancel a `ci` run and vice versa — that separation is
+# the reason concurrency is not part of the label problem any more.
+#
+# Within this workflow, `cancel-in-progress` is what this file wants: a new push
+# to a PR supersedes the run for the previous head commit, and a push to `main`
+# supersedes an in-flight push to `main`. Cancelling a *superseded* run is safe —
+# GitHub reports it as cancelled (never as success), and the newer run covers the
+# newer commit. What must not happen is cancelling the run that belongs to the
+# commit being merged; with `labeled` removed from this workflow there is no
+# label event that could do that.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # The gate every PR passes. Runs on every code-bearing event, and has no `if:`
+  # — it must never be skipped, because a skipped job reports `skipped` and
+  # branch protection treats that as satisfied. Chromium across the three
+  # viewports is the signal (468 assertions); the other engines are added by
+  # `e2e-full` without ever being a condition of merging.
   ci:
-    name: lint / check / test / build / e2e
+    name: lint / check / test / build / e2e (chromium)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       CI: 'true'
     steps:
@@ -46,7 +89,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: E2E tests
+      - name: E2E tests (Chromium, three viewports)
         run: pnpm test:e2e
 
       - name: Upload Playwright report
@@ -54,6 +97,75 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The full browser matrix: desktop on Chromium, Firefox and WebKit; tablet on
+  # Chromium; mobile as Pixel 7 (Chromium) and iPhone 14 (WebKit).
+  #
+  # When it runs (this file): on `main`, on every push. That is the issue's "the
+  # full matrix passes on main".
+  #
+  # When it runs on a PR: **never from this file.** Labelling a PR is
+  # `pull_request: labeled`, which this workflow does not subscribe to (see the
+  # `on:` comment). It is handled by `e2e-full-on-label.yml`, which checks out the
+  # PR head, runs the same `pnpm test:e2e:full`, and reports a *differently named*
+  # check so the two can never be confused for one another.
+  #
+  # The `if:` below is therefore only about `push`. It is written to accept *only*
+  # a push and to refuse anything else, rather than to also inspect labels: an
+  # `if:` that mentioned labels here would be dead code pretending to be
+  # behaviour, which is how the original bug stayed invisible.
+  #
+  # Why it is a *separate* job rather than a matrix on `ci`: the full matrix needs
+  # three browser binaries plus their system libraries, so folding it in would
+  # make every PR wait for WebKit and Firefox. Keeping it separate means the
+  # required check stays fast while those engines are additional evidence — and a
+  # label cannot be a required check anyway, since labels arrive after the PR
+  # opens.
+  e2e-full:
+    name: e2e full matrix (chromium + firefox + webkit)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Firefox and WebKit each need their own binary plus system libraries.
+      # `--with-deps` installs those libs; Chromium is included so a single
+      # step guarantees the whole matrix is present.
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # `pnpm test:e2e:full` is `playwright test` with no `--project` filter, so
+      # it runs every project in playwright.config.ts. The Chromium projects
+      # repeat here on purpose: this job's verdict has to stand on its own, not
+      # depend on artefacts from `ci`.
+      - name: E2E tests (full matrix)
+        run: pnpm test:e2e:full
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-full
           path: playwright-report/
           retention-days: 7
           if-no-files-found: ignore

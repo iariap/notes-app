@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { pressTab } from './helpers/keyboard';
 
 /**
  * The one-time storage notice (#10, story 5 of the epic): it explains where the
@@ -51,7 +52,7 @@ test.describe('storage notice', () => {
 		await expect(page.locator(NOTICE)).toHaveCount(0);
 	});
 
-	test('fits the viewport and keeps the header fully on screen', async ({ page }, testInfo) => {
+	test('fits the viewport and keeps the header fully on screen', async ({ page }) => {
 		await page.goto('/');
 		await expect(page.locator(NOTICE)).toBeVisible();
 
@@ -76,7 +77,6 @@ test.describe('storage notice', () => {
 			// Sidebar column: the same ~320 px the shell gives the list.
 			expect(notice.width).toBeGreaterThanOrEqual(300);
 			expect(notice.width).toBeLessThanOrEqual(340);
-			expect(testInfo.project.name).not.toBe('mobile');
 		} else {
 			// Full width below md.
 			expect(notice.width).toBeGreaterThanOrEqual(viewport.width - 1);
@@ -96,11 +96,13 @@ test.describe('storage notice', () => {
 
 		// The skip link is first, then the header's "New note", then the notice:
 		// it is in the document order a keyboard user expects, not behind a trap.
-		await page.keyboard.press('Tab');
+		// Tabbing uses the key this engine binds to it (WebKit needs Alt+Tab for
+		// links; see `helpers/keyboard.ts`), so the walk is the same everywhere.
+		await pressTab(page);
 		await expect(page.getByTestId('skip-link')).toBeFocused();
 		const reached = await (async () => {
 			for (let i = 0; i < 6; i += 1) {
-				await page.keyboard.press('Tab');
+				await pressTab(page);
 				if (await button.evaluate((el) => el === document.activeElement)) return true;
 			}
 			return false;

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { isNarrow } from './helpers/keyboard';
 
 /**
  * Issue #7: the note editor and its autosave.
@@ -346,8 +347,8 @@ test.describe('keyboard and layout', () => {
 
 	test('mobile: full-screen editor, no horizontal scroll, caret line reachable', async ({
 		page
-	}, testInfo) => {
-		test.skip(testInfo.project.name !== 'mobile', 'the single-column layout');
+	}) => {
+		test.skip(!isNarrow(page), 'the single-column layout');
 
 		await page.goto('/notes/new');
 		await hydration(page);
@@ -369,10 +370,8 @@ test.describe('keyboard and layout', () => {
 		expect(box.height).toBeGreaterThan(150);
 	});
 
-	test('desktop: the editor sits in the right pane next to the list', async ({
-		page
-	}, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'two-pane layout only');
+	test('desktop: the editor sits in the right pane next to the list', async ({ page }) => {
+		test.skip(isNarrow(page), 'two-pane layout only');
 
 		await page.goto('/notes/new');
 		await hydration(page);

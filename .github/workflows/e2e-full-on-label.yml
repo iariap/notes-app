@@ -1,0 +1,113 @@
+name: E2E full matrix (label)
+
+# Runs the six-project matrix on a PR when it is labelled `full-e2e`.
+#
+# ## Why this is a separate workflow
+#
+# `labeled` had to be added somewhere: `ci.yml` lists its `pull_request` types
+# explicitly and `labeled` is not one of GitHub's defaults, so applying the label
+# used to produce no run at all (reproduced on PR #23).
+#
+# It could not be added to `ci.yml`. `labeled` fires for *every* label, so that
+# would re-run the `ci` gate for `bug`, `docs`, `p1`, etc. — ~5 minutes each, on
+# a check that PRs are required to pass. Suppressing that with an `if:` on `ci`
+# would be worse than wasteful: a job skipped by `if:` reports the `skipped`
+# conclusion, and branch protection counts a skipped required check as **passing**.
+# A label event would then leave `ci` looking green on a commit whose real run was
+# still in flight — or had just been cancelled by `cancel-in-progress`. That is an
+# ungated merge path, so it is rejected outright.
+#
+# Keeping the trigger in its own workflow removes the risk instead of reasoning
+# about it: `ci` keeps running on every code-bearing event and is never skipped,
+# while a label event produces *no* check run for `ci` at all. A workflow that
+# does not trigger records nothing, and "nothing" cannot satisfy a required check.
+#
+# ## Why the check name differs from `ci.yml`'s matrix job
+#
+# `ci.yml`'s job is `e2e full matrix (chromium + firefox + webkit)`. This one is
+# `e2e full matrix, labelled (chromium + firefox + webkit)`. Same suite, different
+# name on purpose: two workflows that can run for the same commit must not publish
+# the same check name, or the PR shows one entry whose result depends on whichever
+# run finished last.
+#
+# ## Why the concurrency group is separate
+#
+# Different `github.workflow`, so this run cannot cancel an in-flight `ci` run and
+# `ci` cannot cancel it. Within this workflow, a second label application for the
+# same PR supersedes its own previous run — that run is for the same commit, so
+# cancelling the older duplicate is correct.
+#
+# ## Do not add this to the required checks
+#
+# It fires only on a label, so most PRs never produce it; requiring it would block
+# every PR until someone labelled it. `ci` is the gate. This is additional
+# evidence, and it never replaces `ci`'s verdict on the same commit.
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Least privilege: the matrix only needs to read the code.
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-full-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-full-labelled:
+    name: e2e full matrix, labelled (chromium + firefox + webkit)
+    # Only the label this workflow exists for. Any other label ends the run here,
+    # which costs nothing and publishes nothing that gate-checks look at.
+    if: github.event.label.name == 'full-e2e'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+    steps:
+      # Default checkout — the PR *merge* ref — deliberately matching `ci.yml`.
+      #
+      # Do not pin `github.event.pull_request.head.sha` here. The gate tests the
+      # merge commit (what would actually land); pinning the raw head would make
+      # the label run test a different tree, so a green label run could coexist
+      # with a red `ci` on the same PR — precisely the confusion this job is
+      # meant to remove. `pull_request` refs are the same for every action type,
+      # so the default is correct for `labeled` too.
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Firefox and WebKit each need their own binary plus system libraries.
+      # `--with-deps` installs those libs; Chromium is included so a single step
+      # guarantees the whole matrix is present.
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # `pnpm test:e2e:full` is `playwright test` with no `--project` filter, so it
+      # runs every project in playwright.config.ts — byte-identical to what
+      # `ci.yml` runs on `main`, so a label run and a `main` run cannot disagree
+      # about what "the full matrix" means.
+      - name: E2E tests (full matrix)
+        run: pnpm test:e2e:full
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-full-labelled
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
