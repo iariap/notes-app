@@ -348,57 +348,108 @@ zero axe serious/critical violations at every state.
 
 ## 5. Performance — measured
 
-Run on this machine (macOS arm64, headless Chromium), the acceptance suite's
-`performance.spec.ts` under `--project=desktop`. Numbers are copied from the
-run's own output.
+**One gate, one recorder, one shared probe.** The 1,000-note render gate lives in
+`tests/e2e/notes-list-perf.spec.ts` (#6, load-bearing). The acceptance spec
+(`tests/e2e/acceptance/performance.spec.ts`, #11) gates the _same property_ with
+the _same_ methodology, because #11 asks it to measure performance and a recorded
+number nobody can fail is a number nobody maintains — but it does so through one
+shared helper (`tests/e2e/helpers/list-perf.ts`), so the two can never drift.
 
-| metric                                           | measured                                                                                                  | target         | status                                           |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------ |
-| **1,000 notes — list first render**              | 144 ms seeded vs 29 ms empty → **delta 115 ms** (samples: empty `[29, 41, 23]`, seeded `[156, 144, 140]`) | delta < 500 ms | **GATED**                                        |
-| **typing in a 10,000-char note**                 | **p95 15 ms** per keystroke vs 14 ms in an empty note (median 8 ms, 40 keystrokes)                        | p95 < 40 ms    | **GATED**                                        |
-| **repeat-visit first paint**                     | median **31 ms** FCP (samples `[31, 31, 31]`)                                                             | < 1,000 ms     | **RECORDED**                                     |
-| scrolling 1,000 notes (reused gate)              | +0 ms over an empty list (empty median 17 ms → seeded 17 ms)                                              | delta < 250 ms | **GATED** (`notes-list-perf.spec.ts`, unchanged) |
-| 1,000-note first render (reused gate, 5 samples) | marginal **108–116 ms** over two runs (seeded median 134–139 ms vs empty 23–27 ms)                        | delta < 500 ms | **GATED** (`notes-list-perf.spec.ts`, unchanged) |
+| metric                              | basis                                                                                 | samples             | target         | status                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------- | ------------------- | -------------- | ------------------------------------- |
+| **1,000 notes — list first render** | marginal delta, **median-to-median**, both cold loads from document start             | **5 per condition** | delta < 500 ms | **GATED** (both specs, same helper)   |
+| **typing in a 10,000-char note**    | p95 per-keystroke cost on the page clock; control = identical typing in an empty note | 40 keystrokes each  | p95 < 40 ms    | **GATED**                             |
+| **repeat-visit first paint**        | absolute FCP after the service worker is warm                                         | 3                   | < 1,000 ms     | **RECORDED only**                     |
+| scrolling 1,000 notes               | longest scroll frame delta vs an empty list                                           | 3 each              | delta < 250 ms | **GATED** (`notes-list-perf.spec.ts`) |
 
-The figures above are from the final `pnpm test:e2e:full` run. Across every run made
-while building this, the 1,000-note delta ranged **84–115 ms**, typing p95
-**13–15 ms**, and repeat-visit FCP **20–36 ms**; both gates keep ≥4× headroom and
-neither ever approached its budget.
+### Measured numbers
 
-**Which are gated and why.**
+Latest run on this machine (macOS arm64, headless Chromium):
 
-- **Gated — first render.** The gate is the _delta_ against an empty list
-  measured on the same machine in the same run, following the discipline
-  `notes-list-perf.spec.ts` established: an absolute number measures the runner.
-  An absolute reading is _also_ printed and attached, so a report can quote both.
+| metric                  | value                                                                                                             |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 1,000-note first render | marginal **90 ms** — empty median 23 ms `[24, 38, 23, 22, 22]` → seeded median 114 ms `[118, 114, 111, 112, 134]` |
+| typing, 10,000 chars    | p95 **15 ms** vs 16 ms empty (median 7 ms, 40 keystrokes)                                                         |
+| repeat-visit FCP        | median **19 ms** `[25, 19, 19]`                                                                                   |
+
+Under **heavy parallel load** (a full 3-project suite at 10 workers running
+concurrently, perf specs at `--repeat-each=3`), the same suites stayed green —
+15/15 — with the marginal at **96–130 ms** while both baselines inflated together
+(empty 30–45 ms, seeded 140–162 ms). That is the delta property doing its job:
+contention raises the control and the subject alike.
+
+On the **real CI runner** (much slower) the same property measured a marginal of
+**389 ms** (empty median 88 ms → seeded 477 ms), still inside the 500 ms budget.
+
+### Which are gated and why
+
+- **Gated — first render.** The gate is the _delta_ against an empty list measured
+  on the same machine in the same run: an absolute number measures the runner.
+  Both sides are the **median of 5 cold loads**, so one GC pause or one noisy
+  neighbour cannot fail the gate while a genuine regression still moves the
+  median. Absolute readings are printed and attached too, so a report can quote
+  both.
 - **Gated — typing.** The control types the same number of characters into an
   empty note, so the constant cost of Playwright's own input dispatch cancels.
-  The probe measures from the `input` event to the next painted frame, inside
-  the page clock.
-- **Recorded — first paint.** Deliberately _not_ gated. The epic's "< 1 s" is
-  about a user's machine after a first visit; this suite serves `localhost` from
-  a cold context, so an absolute gate would either be trivially met (and prove
-  nothing) or fail on a loaded CI runner (and measure the runner). It is printed
-  and attached, so a regression is visible as a number that moved. The remaining
-  assertions are that the metric is real and finite, so a broken probe fails
-  loudly instead of reporting zero.
+- **Recorded — first paint.** Deliberately _not_ gated: the epic's "< 1 s" is
+  about a user's machine after a first visit, and this suite serves `localhost`
+  from a cold context, so an absolute gate would be either trivially met or a
+  measurement of the runner. It is printed and attached, so a regression is
+  visible as a number that moved. The remaining assertions are that the metric is
+  real and finite, so a broken probe fails loudly instead of reporting zero.
 
-**Two measurement bugs found and fixed while building this** (recorded because
-they explain why the numbers are trustworthy):
+### Three measurement bugs found and fixed (they explain why the numbers are trustworthy)
 
-1. The Event Timing API (`PerformanceEventTiming.duration`) is the obvious
-   instrument and is unusable here: `duration` is quantised to the frame interval
-   (every sample reads ~16.7 ms, so 1 ms and 16 ms are indistinguishable), its
-   buffer drops entries, and the sample count varied **0–9 for the same five
-   keystrokes** across consecutive rounds on this machine. Replaced with an
-   in-page `input` listener → `requestAnimationFrame` interval, which reported
-   a sample for **every** keystroke in every run.
-2. Both typing measurements initially reported **0 samples**, because an
-   existing note opens _without_ focus (by design, so reading on a phone does not
-   raise the soft keyboard) and the keystrokes went to `<body>`. The tests now
-   place focus and assert it, and assert that more than half the expected
-   keystrokes were measured — so a silently empty measurement fails instead of
-   producing a `NaN` p95 that compares `false` to the budget.
+1. **The Event Timing API is unusable for typing latency.** `duration` is
+   quantised to the frame interval (every sample reads ~16.7 ms, so 1 ms and
+   16 ms are indistinguishable), its buffer drops entries, and the sample count
+   varied **0–9 for the same five keystrokes** across consecutive rounds.
+   Replaced with an in-page `input` listener → `requestAnimationFrame` interval,
+   which reported a sample for **every** keystroke in every run.
+2. **Both typing measurements initially reported 0 samples.** An existing note
+   opens _without_ focus by design (so reading one on a phone does not raise the
+   soft keyboard), so the keystrokes went to `<body>`. The tests now place focus,
+   assert it, and assert that more than half the expected keystrokes were
+   measured — a silently empty measurement fails instead of producing a `NaN`
+   p95 that compares `false` to the budget.
+3. **The render gate was too noisy to gate — and it failed on real CI because of
+   it.** The acceptance spec used **n=3** and its own copy of the probe, and
+   failed on CI while `notes-list-perf.spec.ts` passed on the same runner, in the
+   same run:
+
+   ```
+   acceptance (n=3):      empty [116, 67, 162]      seeded [722, 784, 727]      -> delta 611  FAIL
+   notes-list-perf (n=5): empty [90,80,104,88,63]   seeded [574,447,457,573,477] -> delta 389  PASS
+   ```
+
+   Two defects, both methodological:
+
+   - **The probe was installed twice.** `addInitScript` accumulates, so the
+     `'empty'` probe from the control phase kept running on every seeded load,
+     spinning a rAF loop that re-queried the DOM on every frame _during the
+     render it was measuring_ (measured: 24 extra queries per load, ~4 % of
+     seeded time under 8× CPU throttling).
+   - **n=3 is too few.** The distribution is heavy-tailed and right-skewed; the
+     median of 3 is decided by one order statistic. Replaying every 3-subset of
+     `notes-list-perf.spec.ts`'s own _passing_ samples moves the verdict across a
+     **126 ms** range (367–493 ms) — the same data passes or fails depending on
+     which three cold loads land.
+
+   Fixed by adopting the proven methodology: **one** probe, target via
+   `sessionStorage`, **5 samples per condition**, median-to-median marginal. The
+   500 ms budget was **not** raised. Verified with a negative control: setting
+   the budget to 1 ms makes both specs fail (`Received: 89` / `93` against
+   `Expected: < 1`).
+
+### Residual risk, stated plainly
+
+Under _artificial_ CPU throttling combined with 10 parallel workers, the marginal
+measured **843 ms** and the property genuinely fails. A seeded render costs ~3×
+the CPU of an empty one, so contention does not cancel exactly in a subtractive
+delta — this is the runner, not the app, but it is a real limit of the method on
+a heavily overloaded machine. The mitigation available without weakening the gate
+is to not run two 1,000-note benchmarks concurrently (both specs qualify for it
+and run as separate parallel workers). Recorded as a known limitation in §7.
 
 ---
 
@@ -428,8 +479,13 @@ Untouched, as required:
 - **The sanitizer tests** — `tests/e2e/markdown-preview.spec.ts`'s 7-payload
   table and `tests/unit/markdown-render.spec.ts` are untouched; only the two
   project-name checks in the E2E spec changed.
-- **`notes-list-perf.spec.ts`** — no changes at all; its delta budgets
-  (500 ms render, 250 ms scroll frame) are exactly as they were.
+- **`notes-list-perf.spec.ts`** — its delta budgets (500 ms render, 250 ms scroll
+  frame), sample counts (5 render, 3 scroll) and assertions are **byte-identical
+  to #6**. It _was_ refactored to import the probe from the shared helper
+  (`tests/e2e/helpers/list-perf.ts`); that is a relocation of the same code, not
+  a change of behaviour, and §5 records the verification. The one thing that
+  helper adds to its path is clearing `window.__listReady` before each measured
+  load, so a stale stamp from a previous load cannot be read as the new one's.
 - **`pwa-update-prompt.spec.ts`** — no changes; the new first-install spec is a
   separate file.
 
@@ -519,6 +575,22 @@ question automation cannot settle.
     the fix only takes effect once the workflow file is on the PR's head — a
     workflow added by a PR does not run for that PR's own label events. It needs
     one real label event _after_ this lands to be confirmed live.
+
+11. **The 1,000-note render gate is sensitive to _artificial_ load, and one
+    mitigation is not applied.** Two specs (the proven one and the acceptance one)
+    each run a 1,000-note benchmark, and `fullyParallel: true` lets them run as
+    concurrent workers. Under genuine CI contention the delta still held (389 ms
+    on the real runner; 96–130 ms locally under 10 parallel workers), but under
+    _artificial_ CPU throttling combined with that concurrency it measured 843 ms
+    and the property really did fail — a seeded render costs ~3× the CPU of an
+    empty one, so contention does not cancel exactly in a subtractive delta.
+
+    The clean fix would be to serialise the two benchmarks (a shared resource lock
+    or `mode: 'serial'`) so they never overlap. **Not done here**, deliberately:
+    it changes how `notes-list-perf.spec.ts` is _scheduled_, and the scope of this
+    change was the acceptance spec's methodology. Worth doing if a `main` run ever
+    shows the delta drifting toward the budget. Raising the 500 ms budget is
+    **not** the fix, and was rejected.
 
 ---
 

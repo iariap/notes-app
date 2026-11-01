@@ -1,4 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
+import {
+	coldLoadToReady,
+	describeSamples,
+	installListReadyProbe,
+	median
+} from './helpers/list-perf';
 import { seedNote, seedNotes } from './helpers/seed';
 
 /**
@@ -69,18 +75,6 @@ const SCROLL_FRAME_BUDGET_MS = 250;
  */
 const PERF_TEST_TIMEOUT_MS = 240_000;
 
-declare global {
-	interface Window {
-		__listReady?: number;
-	}
-}
-
-/** What "the list is ready" means for one load. */
-type ListTarget = { kind: 'empty' } | { kind: 'rows'; count: number };
-
-/** Where the current load's target is handed to the init script. */
-const TARGET_KEY = 'perf:list-target';
-
 /** 1,000 notes with varied, realistic bodies. */
 function thousandNotes(now: number) {
 	return Array.from({ length: NOTE_COUNT }, (_, index) => {
@@ -93,64 +87,6 @@ function thousandNotes(now: number) {
 					: `Note ${index}`;
 		return seedNote(index, body, createdAt);
 	});
-}
-
-/** Median of a sample set (even counts average the two middle values). */
-function median(values: readonly number[]): number {
-	const sorted = [...values].sort((a, b) => a - b);
-	const middle = Math.floor(sorted.length / 2);
-	return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
-
-/**
- * Installs the page-clock probe. Registered **once** per page: `addInitScript`
- * accumulates, and a second script with a different target would race the
- * first for `window.__listReady` and quietly under-report the load it measures.
- */
-async function installListReadyProbe(page: Page): Promise<void> {
-	await page.addInitScript((key) => {
-		const target: ListTarget = JSON.parse(
-			sessionStorage.getItem(key) ?? '{"kind":"empty"}'
-		) as ListTarget;
-		const tick = () => {
-			const ready =
-				target.kind === 'empty'
-					? document.querySelector('[data-slot="note-list-empty"]') !== null
-					: document.querySelectorAll('[data-slot="note-row"]').length >= target.count;
-			if (ready) {
-				window.__listReady = performance.now();
-				return;
-			}
-			requestAnimationFrame(tick);
-		};
-		requestAnimationFrame(tick);
-	}, TARGET_KEY);
-}
-
-/**
- * Cold-loads `/` and returns the page-clock instant at which the list was
- * ready, after proving to Playwright that it really settled into the state the
- * probe was waiting for.
- */
-async function coldLoadToReady(page: Page, target: ListTarget): Promise<number> {
-	// Same origin as the app, so `sessionStorage` accepts the write; the value
-	// survives the navigation the probe then measures.
-	await page.evaluate(({ key, value }) => sessionStorage.setItem(key, value), {
-		key: TARGET_KEY,
-		value: JSON.stringify(target)
-	});
-	await page.goto('/');
-
-	if (target.kind === 'empty') {
-		await expect(page.getByTestId('note-list-empty')).toBeVisible();
-	} else {
-		await expect(page.locator('[data-slot="note-row"]')).toHaveCount(target.count);
-	}
-
-	await page.waitForFunction(() => typeof window.__listReady === 'number', undefined, {
-		timeout: 30_000
-	});
-	return page.evaluate(() => window.__listReady as number);
 }
 
 /**
@@ -177,10 +113,6 @@ function longestScrollFrame(page: Page): Promise<number> {
 		return Math.max(...frames);
 	});
 }
-
-/** How a report reads the two sample sets. */
-const describeSamples = (label: string, samples: readonly number[]): string =>
-	`${label} median ${Math.round(median(samples))} ms [${samples.map((value) => Math.round(value)).join(', ')}]`;
 
 test.describe('1,000 notes', () => {
 	test.skip(

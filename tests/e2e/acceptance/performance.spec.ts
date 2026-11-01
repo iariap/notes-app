@@ -1,4 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
+import {
+	coldLoadToReady,
+	describeSamples,
+	installListReadyProbe,
+	median
+} from '../helpers/list-perf';
 import { seedNote, seedNotes, type SeedNote } from '../helpers/seed';
 import { placeCaretAtEnd } from './support';
 
@@ -9,42 +15,78 @@ import { placeCaretAtEnd } from './support';
  * - typing latency inside a 10,000-character note
  * - repeat-visit first paint < 1 s
  *
- * ## Why this is not a second copy of `notes-list-perf.spec.ts`
+ * ## Which numbers are gated, on what basis, and why
  *
- * That spec already gates the 1,000-note cost — as a **delta against an empty
- * list measured on the same machine, in the same run**, because an absolute
- * wall-clock number measures the runner as much as the code (it recorded
- * 90–230 ms for the same list locally, and 503 ms under contention). Those
- * gates stay exactly as they are; this file does not restate them.
+ * | metric | how | samples | status |
+ * |---|---|---|---|
+ * | 1,000-note first render | **marginal delta**, median-to-median, both cold loads from document start | **5 per condition** | **gated** (< 500 ms) |
+ * | typing latency, 10,000 chars | p95 per-keystroke cost measured inside the page, control = same typing in an empty note | 40 keystrokes each | **gated** (< 40 ms) |
+ * | repeat-visit first paint | absolute, after the service worker is warm | 3 | **recorded only** |
  *
- * What is new here is the two targets that spec never measured — typing latency
- * and repeat-visit first paint — plus an absolute reading of the first render
- * *recorded* next to the delta so the report can quote both.
+ * ## Why the render gate is n=5 and a median-to-median delta
  *
- * ## Which numbers are gated, and which are recorded
+ * The first version of this file used **n=3** and a hand-rolled copy of the
+ * probe, and it failed on real CI while the equivalent, load-bearing test
+ * (`notes-list-perf.spec.ts`) passed on the same runner in the same run:
  *
- * | metric | how | gate |
- * |---|---|---|
- * | 1,000-note first render | delta over an empty load, same run | **gated** (< 500 ms, as #6 set) |
- * | typing latency, 10,000 chars | per-keystroke main-thread cost, 95th pct | **gated** (relative to an empty note) |
- * | repeat-visit first paint | absolute, after the service worker is warm | **recorded only** |
+ * ```
+ * this file (n=3):      empty [116, 67, 162]  seeded [722, 784, 727]  -> delta 611  FAIL
+ * notes-list-perf (n=5): empty [90,80,104,88,63] seeded [574,447,457,573,477] -> delta 389  PASS
+ * ```
  *
- * The repeat-visit number is recorded rather than gated, deliberately. The
- * target in the epic ("< 1 s") is about a user's machine after a first visit,
- * and this suite's preview server is `localhost` with a cold cache per context;
- * an absolute gate there would either be trivially met (and mean nothing) or
- * fail on a loaded CI runner (and mean the runner is slow). The measured value
- * is printed and attached so `docs/qa-v1.md` can quote it and a regression is
- * still visible as a number that moved.
+ * Two estimators of one property disagreeing by 250 ms on the same machine is a
+ * property of the estimator, not of the app. Two defects caused it:
  *
- * Everything here runs in **one** project (`desktop`): the numbers are
- * engine- and viewport-specific, and six copies of the same benchmark would
- * triple the full-matrix runtime for no extra signal. The engine comparison is
- * a separate, cheaper test.
+ * 1. **The probe was installed twice.** `addInitScript` accumulates, so the
+ *    `'empty'` probe from the control phase kept running on every seeded load,
+ *    spinning a rAF loop that re-queried the DOM on every frame *during the
+ *    render it was measuring*. Measured: 24 extra queries per load, ~4 % of
+ *    seeded time under 8× CPU throttling.
+ * 2. **n=3 is too few.** The distribution is heavy-tailed and right-skewed; the
+ *    median of 3 is decided by one order statistic. Replaying every 3-subset of
+ *    `notes-list-perf.spec.ts`'s own passing samples moves the verdict across a
+ *    **126 ms** range (367–493 ms) — the same data passes or fails depending on
+ *    which three cold loads happen to land.
+ *
+ * So this file now **uses the shared probe** (`tests/e2e/helpers/list-perf.ts`,
+ * the same code path as the load-bearing test) and takes **5 samples per
+ * condition**, gating the median-to-median marginal. The 500 ms budget is
+ * unchanged: with sound sampling the property has ~4× headroom (measured
+ * delta 84–120 ms locally, 389 ms on the slow CI runner), and a genuine
+ * regression still moves the median well past it.
+ *
+ * The remaining risk is not sampling. Under artificial CPU throttling *and* 10
+ * parallel workers the delta measured 843 ms — because a seeded render is ~3×
+ * more CPU than an empty one, so contention does not fully cancel in a
+ * subtractive delta. That is the runner, and the mitigation is to not run two
+ * 1,000-note benchmarks concurrently (this spec and `notes-list-perf.spec.ts`
+ * both qualify for it); see `docs/qa-v1.md`.
+ *
+ * ## Gating the same property twice, on purpose
+ *
+ * `notes-list-perf.spec.ts` already gates this property. The duplication is kept
+ * deliberately and is not free: it costs ~15 s on `main`, and it is the gate that
+ * catches *this* file's methodology drifting. What must not happen — and no
+ * longer can — is the two using different probes: they share one helper, so they
+ * measure the same thing by construction. Issue #11 asks performance to be
+ * *measured and recorded*, which the annotations, `console.log` lines and
+ * attachments do; the gate is a bonus that keeps the recorded number honest.
+ *
+ * Everything here runs in **one** project (`desktop`): the numbers are engine-
+ * and viewport-specific, and six copies would triple the matrix runtime for no
+ * extra signal.
  */
 
 const NOTE_COUNT = 1000;
+/** The proven spec's figure, unchanged. Not raised to accommodate noise. */
 const LIST_DELTA_BUDGET_MS = 500;
+/** Same as `notes-list-perf.spec.ts`: the median of 5 cold loads, not 3. */
+const RENDER_SAMPLES = 5;
+/**
+ * Samples for the recorded first paint. Fewer than the gated render number on
+ * purpose: nothing is asserted from it, so more samples would only cost time.
+ */
+const FCP_SAMPLES = 3;
 const TYPING_BUDGET_MS = 40;
 /** A 10,000-character note: the size the issue names. */
 const LONG_NOTE_LENGTH = 10_000;
@@ -53,12 +95,6 @@ const LONG_NOTE_LENGTH = 10_000;
  * worst couple of keystrokes) while keeping the test under two seconds.
  */
 const KEYSTROKES = 40;
-
-declare global {
-	interface Window {
-		__firstRender?: number;
-	}
-}
 
 /** 1,000 notes with realistic, varied bodies. */
 function thousandNotes(now: number): SeedNote[] {
@@ -74,60 +110,11 @@ function thousandNotes(now: number): SeedNote[] {
 	});
 }
 
-/** Median of a sample set. */
-function median(values: readonly number[]): number {
-	const sorted = [...values].sort((a, b) => a - b);
-	const middle = Math.floor(sorted.length / 2);
-	return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
-
 /** The value at `quantile` (0–1) of a sample set. */
 function percentile(values: readonly number[], quantile: number): number {
 	const sorted = [...values].sort((a, b) => a - b);
 	const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(quantile * sorted.length) - 1));
 	return sorted[index];
-}
-
-/**
- * Installs a first-render probe that stamps the page clock when the list is
- * ready, before any app script runs.
- *
- * A `requestAnimationFrame` loop is the timestamp source because rAF only
- * advances when the main thread is free: the instant can never land in the
- * middle of the render it measures. The target comes from `sessionStorage` so
- * one script serves both the empty control and the seeded subject.
- */
-async function installFirstRenderProbe(page: Page, target: 'empty' | number): Promise<void> {
-	await page.addInitScript((expected) => {
-		const ready = () => {
-			if (expected === 'empty') {
-				return document.querySelector('[data-slot="note-list-empty"]') !== null;
-			}
-			return document.querySelectorAll('[data-slot="note-row"]').length >= Number(expected);
-		};
-		const tick = () => {
-			if (ready()) {
-				window.__firstRender = performance.now();
-				return;
-			}
-			requestAnimationFrame(tick);
-		};
-		requestAnimationFrame(tick);
-	}, target);
-}
-
-/** Cold-loads `/` and returns the page-clock instant the list became ready. */
-async function coldLoadFirstRender(page: Page, target: 'empty' | number): Promise<number> {
-	await page.goto('/');
-	if (target === 'empty') {
-		await expect(page.getByTestId('note-list-empty')).toBeVisible();
-	} else {
-		await expect(page.locator('[data-slot="note-row"]')).toHaveCount(target);
-	}
-	await page.waitForFunction(() => typeof window.__firstRender === 'number', undefined, {
-		timeout: 30_000
-	});
-	return page.evaluate(() => window.__firstRender as number);
 }
 
 /**
@@ -207,20 +194,23 @@ test.describe('performance', () => {
 	test('1,000 notes cost less than 500 ms of extra first render', async ({ page }, testInfo) => {
 		test.setTimeout(240_000);
 
-		// Control and subject, same run, same machine: the shell, the bundle and
-		// the runner's noise are paid identically by both and cancel in the delta.
-		await installFirstRenderProbe(page, 'empty');
+		// One probe for the whole test, installed once: `addInitScript` accumulates,
+		// and the second install this test used to do left a dead `'empty'` probe
+		// spinning on every seeded load. See `tests/e2e/helpers/list-perf.ts`.
+		await installListReadyProbe(page);
+
+		// Control: the identical cold load with an empty list, 5 samples.
 		await seedNotes(page, []);
 		const emptySamples: number[] = [];
-		for (let sample = 0; sample < 3; sample += 1) {
-			emptySamples.push(await coldLoadFirstRender(page, 'empty'));
+		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+			emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
 		}
 
-		await installFirstRenderProbe(page, NOTE_COUNT);
+		// Subject: the same load with 1,000 notes in storage, 5 samples.
 		await seedNotes(page, thousandNotes(Date.now()));
 		const seededSamples: number[] = [];
-		for (let sample = 0; sample < 3; sample += 1) {
-			seededSamples.push(await coldLoadFirstRender(page, NOTE_COUNT));
+		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+			seededSamples.push(await coldLoadToReady(page, { kind: 'rows', count: NOTE_COUNT }));
 		}
 
 		const empty = median(emptySamples);
@@ -228,9 +218,12 @@ test.describe('performance', () => {
 		const delta = Math.round(seeded - empty);
 
 		const report =
-			`1,000 notes: first render ${Math.round(seeded)} ms vs ${Math.round(empty)} ms empty ` +
-			`(delta ${delta} ms); samples empty [${emptySamples.map(Math.round).join(', ')}] ` +
-			`seeded [${seededSamples.map(Math.round).join(', ')}] — GATED at < ${LIST_DELTA_BUDGET_MS} ms`;
+			`${NOTE_COUNT.toLocaleString('en-US')} notes: marginal ${delta} ms — ` +
+			`${describeSamples('empty', emptySamples)} -> ${describeSamples(
+				'seeded',
+				seededSamples
+			)}, both from document start, ${RENDER_SAMPLES} cold loads each ` +
+			`— GATED at < ${LIST_DELTA_BUDGET_MS} ms`;
 		console.log(`[perf] ${report}`);
 		testInfo.annotations.push({ type: 'perf:list-first-render', description: report });
 		await testInfo.attach('perf-list-first-render.txt', {
@@ -311,7 +304,7 @@ test.describe('performance', () => {
 		await page.reload();
 
 		const samples: number[] = [];
-		for (let sample = 0; sample < 3; sample += 1) {
+		for (let sample = 0; sample < FCP_SAMPLES; sample += 1) {
 			await page.goto('/');
 			await page.waitForFunction(() => document.querySelector('[data-slot="app-shell"]') !== null);
 			// First Contentful Paint, as the browser itself reports it: the
