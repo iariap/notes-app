@@ -61,12 +61,25 @@ function candidate(preferredId?: string | null, lastResort = false): HTMLElement
  * Moves focus to `preferredId`'s row when it exists, otherwise to the first row,
  * otherwise to the "New note" entry point.
  *
- * On retries it gives up if something else already holds focus: the user
- * moving focus during those few frames outranks this cleanup.
+ * It does nothing at all when something other than `<body>` already holds focus,
+ * and that is checked on the first attempt as well as on every retry: the user
+ * moving focus — to the Undo action in the delete toast, most of all — outranks
+ * this cleanup. The legitimate case is *not* covered by that check, and must not
+ * be: after a delete the control the user pressed is gone with its row, so the
+ * browser has already dropped focus to `<body>` and the move proceeds.
+ *
+ * The check sits before `candidate()` on purpose. Testing the condition only
+ * after finding no target (where it used to live) let a row that was on screen
+ * win every time, so focus was taken unconditionally while the toast was being
+ * read from the keyboard — which resumed #8's five second window and closed the
+ * toast under the user.
  */
 export function focusAfterRemoval(preferredId?: string | null): void {
 	let remaining = RETRY_FRAMES;
 	const attempt = (): void => {
+		// Something live holds focus: whoever moved it there knows more than this
+		// cleanup does, so there is nothing left to do — now or in a later frame.
+		if (document.activeElement !== null && document.activeElement !== document.body) return;
 		const target = candidate(preferredId, remaining === 0);
 		if (target !== null) {
 			// `preventScroll` keeps the list where the user left it; focusing is
@@ -76,7 +89,6 @@ export function focusAfterRemoval(preferredId?: string | null): void {
 		}
 		remaining -= 1;
 		if (remaining < 0) return;
-		if (document.activeElement !== null && document.activeElement !== document.body) return;
 		requestAnimationFrame(attempt);
 	};
 	attempt();
