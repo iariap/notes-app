@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import { isNarrow, pressTab } from './helpers/keyboard';
 import { rowTitles, rows, seedNote, seedNotes, waitForList, type SeedNote } from './helpers/seed';
 
 /**
@@ -168,7 +169,7 @@ test.describe('notes list', () => {
 		await expect(time).toHaveAttribute('datetime', createdAt);
 	});
 
-	test('opens /notes/<id> when a row is clicked', async ({ page }, testInfo) => {
+	test('opens /notes/<id> when a row is clicked', async ({ page }) => {
 		const now = Date.now();
 		const notes = datedNotes(now);
 		await openSeeded(page, notes);
@@ -180,7 +181,7 @@ test.describe('notes list', () => {
 		// the accessibility tree (`getByRole` would not find it); from `md` up it
 		// stays in the sidebar with the opened note highlighted.
 		const listPane = page.locator('[data-pane="list"]');
-		if (testInfo.project.name === 'mobile') {
+		if (isNarrow(page)) {
 			await expect(page.getByRole('link', { name: 'Back to notes' })).toBeVisible();
 			expect(await listPane.evaluate((element) => getComputedStyle(element).display)).toBe('none');
 		} else {
@@ -252,7 +253,7 @@ test.describe('empty state', () => {
 		await expect(page).toHaveURL(/\/notes\/new$/);
 	});
 
-	test('the header New note action is available on every viewport', async ({ page }, testInfo) => {
+	test('the header New note action is available on every viewport', async ({ page }) => {
 		await openSeeded(page, []);
 
 		const header = page.getByRole('banner').getByRole('link', { name: 'New note' });
@@ -268,7 +269,7 @@ test.describe('empty state', () => {
 		// Icon-only below `md`: the visible label is hidden, the accessible name is
 		// not.
 		const label = header.locator('span');
-		if (testInfo.project.name === 'mobile') {
+		if (isNarrow(page)) {
 			await expect(label).toBeHidden();
 			await expect(header).toHaveAccessibleName('New note');
 		} else {
@@ -286,10 +287,8 @@ test.describe('empty state', () => {
 });
 
 test.describe('current note', () => {
-	test('highlights the open note when the list is next to the editor', async ({
-		page
-	}, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'the sidebar is hidden below md');
+	test('highlights the open note when the list is next to the editor', async ({ page }) => {
+		test.skip(isNarrow(page), 'the sidebar is hidden below md');
 
 		const notes = datedNotes(Date.now());
 		await openSeeded(page, notes);
@@ -302,8 +301,8 @@ test.describe('current note', () => {
 		await expect(current).toContainText('Weekly plan');
 	});
 
-	test('marks nothing as current on the list route', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'the sidebar is hidden below md');
+	test('marks nothing as current on the list route', async ({ page }) => {
+		test.skip(isNarrow(page), 'the sidebar is hidden below md');
 
 		await openSeeded(page, datedNotes(Date.now()));
 
@@ -346,8 +345,8 @@ test.describe('accessibility', () => {
 		expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
 	});
 
-	test('every row is reachable by keyboard', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'one link per row, same behaviour everywhere');
+	test('every row is reachable by keyboard', async ({ page }) => {
+		test.skip(isNarrow(page), 'one link per row, same behaviour everywhere');
 
 		await openSeeded(page, datedNotes(Date.now()));
 
@@ -358,9 +357,9 @@ test.describe('accessibility', () => {
 		// Since #8 each row contributes two stops: the note link, then its "⋯"
 		// menu. Tabbing twice must reach the next row's link, so every note (and
 		// its actions) is reachable without a pointer.
-		await page.keyboard.press('Tab');
+		await pressTab(page);
 		await expect(page.locator('[data-testid="note-row-menu"]').nth(0)).toBeFocused();
-		await page.keyboard.press('Tab');
+		await pressTab(page);
 		await expect(rows(page).nth(1)).toBeFocused();
 	});
 });

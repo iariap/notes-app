@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import { isNarrow, pressTab } from './helpers/keyboard';
 import { rows, seedNote, seedNotes, waitForList } from './helpers/seed';
 
 const LIST = '[data-pane="list"]';
@@ -36,7 +37,7 @@ const seriousAxeViolations = async (page: Page, context: string) => {
 test.describe('app shell panes', () => {
 	test('list view: the list is always visible, the editor pane only from md up', async ({
 		page
-	}, testInfo) => {
+	}) => {
 		const wide = (page.viewportSize()?.width ?? 0) >= 768;
 		await page.goto('/');
 		await hydration(page);
@@ -52,15 +53,12 @@ test.describe('app shell panes', () => {
 			expect(sidebar?.width).toBeGreaterThanOrEqual(300);
 			expect(sidebar?.width).toBeLessThanOrEqual(340);
 			expect(await page.locator(EDITOR).boundingBox()).not.toBeNull();
-			expect(testInfo.project.name).not.toBe('mobile');
 		} else {
 			await expect(hint).toBeHidden();
 		}
 	});
 
-	test('note view: editor only on mobile, sidebar + editor from md up', async ({
-		page
-	}, testInfo) => {
+	test('note view: editor only on mobile, sidebar + editor from md up', async ({ page }) => {
 		const wide = (page.viewportSize()?.width ?? 0) >= 768;
 		// The list is storage-backed since #6, so the "current" highlight needs a
 		// note that actually exists.
@@ -75,7 +73,6 @@ test.describe('app shell panes', () => {
 		if (wide) {
 			await expect(back).toBeHidden();
 			await expect(page.locator(`${LIST} [aria-current="page"]`)).toBeVisible();
-			expect(testInfo.project.name).not.toBe('mobile');
 		} else {
 			await expect(back).toBeVisible();
 			await expect(back).toHaveAttribute('href', '/');
@@ -84,7 +81,7 @@ test.describe('app shell panes', () => {
 	});
 
 	test('the back button returns to the list on mobile', async ({ page }) => {
-		test.skip(test.info().project.name !== 'mobile', 'mobile-only affordance');
+		test.skip(!isNarrow(page), 'mobile-only affordance');
 
 		await page.goto('/notes/some-id');
 		await hydration(page);
@@ -158,8 +155,9 @@ test.describe('layout invariants', () => {
 		await page.goto('/');
 		await hydration(page);
 
-		// The skip link is the first thing Tab reaches.
-		await page.keyboard.press('Tab');
+		// The skip link is the first thing tabbing reaches — with the key this
+		// engine binds to it, which is `Alt+Tab` on WebKit (see the helper).
+		await pressTab(page);
 		const skip = page.getByRole('link', { name: 'Skip to content' });
 		await expect(skip).toBeFocused();
 
@@ -228,7 +226,7 @@ test.describe('layout invariants', () => {
 		// inside the list pane is still `list` on the way to a row).
 		const order: string[] = [];
 		for (let press = 0; press <= tabStops; press += 1) {
-			await page.keyboard.press('Tab');
+			await pressTab(page);
 			const { zone, isRow } = await focusState();
 			if (zone !== 'other' && zone !== 'none') order.push(zone);
 			if (isRow) break;

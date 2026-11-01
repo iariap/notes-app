@@ -18,7 +18,8 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"test:e2e": "playwright test",
+		"test:e2e": "playwright test --project=desktop --project=tablet --project=mobile",
+		"test:e2e:full": "playwright test",
 		"generate:icons": "pwa-assets-generator"
 	},
 	"devDependencies": {

@@ -10,10 +10,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The gate every PR passes. Runs on every PR, always: a label cannot be
+  # *required* for merge, so whatever a plain PR runs has to be a real signal.
+  # Chromium across the three viewports is that signal (278 assertions), and the
+  # other engines are added by `e2e-full` without ever being a condition of
+  # merging.
   ci:
-    name: lint / check / test / build / e2e
+    name: lint / check / test / build / e2e (chromium)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       CI: 'true'
     steps:
@@ -46,7 +51,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: E2E tests
+      - name: E2E tests (Chromium, three viewports)
         run: pnpm test:e2e
 
       - name: Upload Playwright report
@@ -54,6 +59,66 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The full browser matrix: desktop on Chromium, Firefox and WebKit; tablet on
+  # Chromium; mobile as Pixel 7 (Chromium) and iPhone 14 (WebKit).
+  #
+  # When it runs:
+  #   - on `main`, on every push (the issue's "the full matrix passes on main");
+  #   - on a PR labelled `full-e2e`, for changes that touch rendering, storage
+  #     or the service worker.
+  #
+  # Why it is a *separate* job rather than a matrix on `ci`: a `full-e2e` label
+  # cannot be a required status check (labels are applied after the PR opens, so
+  # requiring the job would block every PR until someone labelled it). Keeping it
+  # separate means the required check is `ci` — which runs on every PR and is a
+  # real gate — while this job is additional evidence that never gates a merge
+  # by its absence.
+  e2e-full:
+    name: e2e full matrix (chromium + firefox + webkit)
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Firefox and WebKit each need their own binary plus system libraries.
+      # `--with-deps` installs those libs; Chromium is included so a single
+      # step guarantees the whole matrix is present.
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # `pnpm test:e2e:full` is `playwright test` with no `--project` filter, so
+      # it runs every project in playwright.config.ts. The Chromium projects
+      # repeat here on purpose: this job's verdict has to stand on its own, not
+      # depend on artefacts from `ci`.
+      - name: E2E tests (full matrix)
+        run: pnpm test:e2e:full
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-full
           path: playwright-report/
           retention-days: 7
           if-no-files-found: ignore

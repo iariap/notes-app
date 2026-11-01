@@ -6,8 +6,13 @@
 		variants: {
 			variant: {
 				default: 'bg-card text-card-foreground',
+				// The description used to be `text-destructive/90`, which over white
+				// lands at 4.49:1 — under WCAG AA's 4.50:1 for normal-size text, and
+				// a real failure rather than a rounding artefact (measured in all
+				// three engines by #11). Full-strength `text-destructive` is 4.77:1,
+				// so the alert keeps its emphasis without dropping below AA.
 				destructive:
-					'text-destructive bg-card *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current'
+					'text-destructive bg-card *:data-[slot=alert-description]:text-destructive *:[svg]:text-current'
 			}
 		},
 		defaultVariants: {

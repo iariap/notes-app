@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { hasCoarsePointer, isNarrow, pressTab } from './helpers/keyboard';
 import { rowTitles, rows, seedNote, seedNotes, waitForList, type SeedNote } from './helpers/seed';
 
 /**
@@ -48,8 +49,6 @@ function storedNotes(page: Page) {
 async function storedNote(page: Page, id: string) {
 	return (await storedNotes(page)).find((note) => note.id === id);
 }
-
-const isMobile = (page: Page) => (page.viewportSize()?.width ?? 0) < 768;
 
 /**
  * Lets `count` animation frames pass on the page clock.
@@ -132,9 +131,7 @@ test.describe('delete from the editor', () => {
 		expect((await storedNotes(page)).map((note) => note.id)).not.toContain(target.id);
 	});
 
-	test('the Delete control is a thumb-reachable, icon-only button on mobile', async ({
-		page
-	}, testInfo) => {
+	test('the Delete control is a thumb-reachable, icon-only button on mobile', async ({ page }) => {
 		const notes = await seedThree(page, Date.now());
 		await page.goto(`/notes/${notes[0].id}`);
 		await hydration(page);
@@ -153,7 +150,7 @@ test.describe('delete from the editor', () => {
 		expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
 
 		const label = button.locator('span');
-		if (isMobile(page) || testInfo.project.name === 'mobile') {
+		if (isNarrow(page)) {
 			await expect(label).toBeHidden();
 		} else {
 			await expect(label).toBeVisible();
@@ -200,8 +197,8 @@ test.describe('undo', () => {
 	test('the window lasts 5 s: inside it Undo works, after it the note is gone', async ({
 		page
 	}, testInfo) => {
-		// The clock is the whole subject, so this runs once rather than in three
-		// projects; the other tests already prove the UI at every width.
+		// The clock is the whole subject, so this runs in one project; the other
+		// tests already prove the UI at every width.
 		test.skip(testInfo.project.name !== 'desktop', 'clock manipulation, run once');
 
 		const notes = await seedThree(page, Date.now());
@@ -279,9 +276,7 @@ test.describe('delete from the list menu', () => {
 		expect(await storedNote(page, target.id)).toEqual(target);
 	});
 
-	test('the menu is always visible on touch and on hover/focus with a mouse', async ({
-		page
-	}, testInfo) => {
+	test('the menu is always visible on touch and on hover/focus with a mouse', async ({ page }) => {
 		await seedThree(page, Date.now());
 		await waitForList(page);
 
@@ -304,7 +299,7 @@ test.describe('delete from the list menu', () => {
 		expect(box.width).toBeGreaterThanOrEqual(44);
 		expect(box.height).toBeGreaterThanOrEqual(44);
 
-		if (testInfo.project.name === 'mobile') {
+		if (await hasCoarsePointer(page)) {
 			// No hover with a finger: it must be painted without any interaction.
 			expect(await opacity()).toBe('1');
 			expect(wrapper).toBeTruthy();
@@ -318,16 +313,18 @@ test.describe('delete from the list menu', () => {
 		await expect.poll(opacity).toBe('1');
 
 		// …and on keyboard focus, which is what keeps it operable without a mouse.
+		// The step that moves focus is the key this engine binds to tabbing: on
+		// WebKit plain `Tab` skips links, so it is `Alt+Tab` (see the helper).
 		await page.mouse.move(0, 0);
 		await expect.poll(opacity).toBe('0');
 		await page.locator('[data-slot="note-row"]').first().focus();
-		await page.keyboard.press('Tab');
+		await pressTab(page);
 		await expect(trigger).toBeFocused();
 		await expect.poll(opacity).toBe('1');
 	});
 
-	test('returns focus to the list, never to <body>, after deleting', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'asserted once; the list behaves the same');
+	test('returns focus to the list, never to <body>, after deleting', async ({ page }) => {
+		test.skip(isNarrow(page), 'asserted once; the list behaves the same');
 
 		await seedThree(page, Date.now());
 		await rows(page).nth(1).hover();
@@ -360,7 +357,7 @@ test.describe('delete from the list menu', () => {
 
 		// From the sidebar menu while the note is open in the editor (the two
 		// panes are on screen together at `md` and up).
-		if (isMobile(page)) {
+		if (isNarrow(page)) {
 			await page.goto('/');
 			await waitForList(page);
 		}
@@ -570,8 +567,8 @@ test.describe('accessibility', () => {
 			.toBeGreaterThan(0.99);
 	}
 
-	test('axe is clean with the row menu open', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name === 'mobile', 'one viewport is enough for the menu markup');
+	test('axe is clean with the row menu open', async ({ page }) => {
+		test.skip(isNarrow(page), 'one viewport is enough for the menu markup');
 
 		await seedThree(page, Date.now());
 		await waitForList(page);

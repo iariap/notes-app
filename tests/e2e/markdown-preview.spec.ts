@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { isSideBySide } from './helpers/keyboard';
 import { seedNote, seedNotes } from './helpers/seed';
 
 /**
@@ -153,8 +154,8 @@ test.describe('the preview follows typing', () => {
 });
 
 test.describe('the responsive layout', () => {
-	test('at 1280 both panes are on screen at once, with no tabs', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name !== 'desktop', 'the ≥ xl layout');
+	test('at 1280 both panes are on screen at once, with no tabs', async ({ page }) => {
+		test.skip(!isSideBySide(page), 'the ≥ xl layout');
 
 		const [note] = await seedNotes(page, [
 			seedNote(1, '# Side by side', '2026-10-31T12:00:00.000Z')
@@ -177,8 +178,8 @@ test.describe('the responsive layout', () => {
 		expect(previewBox.width).toBeGreaterThan(0);
 	});
 
-	test('below 1280 the tabs switch between the two panes', async ({ page }, testInfo) => {
-		test.skip(testInfo.project.name === 'desktop', 'the tabbed layout');
+	test('below 1280 the tabs switch between the two panes', async ({ page }) => {
+		test.skip(isSideBySide(page), 'the tabbed layout');
 
 		const [note] = await seedNotes(page, [seedNote(1, '# Tabbed', '2026-10-31T12:00:00.000Z')]);
 		await page.goto(`/notes/${note.id}`);

@@ -94,6 +94,86 @@ describe('service worker update prompt', () => {
 		expect(updateServiceWorker).toHaveBeenCalledOnce();
 	});
 
+	/**
+	 * The false positive the WebKit and Firefox projects found (#11).
+	 *
+	 * "A new version is available" compares a waiting worker against the version
+	 * the page is *running*. On a first visit there is no such version: the
+	 * worker being installed is the first one, and the page is not controlled
+	 * by anything yet. Firefox reports that first worker as `waiting` for a
+	 * moment when the first page is reloaded while it installs, and the prompt
+	 * fired for a version that does not replace anything — the user pressed
+	 * "Reload" and got the same build twice.
+	 */
+	it('does not prompt when the page is not controlled by a worker yet', () => {
+		registerSW.mockImplementation(() => vi.fn(async () => {}));
+		registerServiceWorkerUpdates({ isControlled: () => false });
+		const options = registerSW.mock.calls[0][0] as RegisterOptions;
+
+		options.onNeedRefresh?.();
+
+		expect(toast).not.toHaveBeenCalled();
+	});
+
+	it('prompts when a controlled page is running an older worker', () => {
+		registerSW.mockImplementation(() => vi.fn(async () => {}));
+		registerServiceWorkerUpdates({ isControlled: () => true });
+		const options = registerSW.mock.calls[0][0] as RegisterOptions;
+
+		options.onNeedRefresh?.();
+
+		expect(toast).toHaveBeenCalledOnce();
+		expect(toast.mock.calls[0][0]).toBe(UPDATE_TOAST_MESSAGE);
+	});
+
+	/**
+	 * The guard must not swallow a genuine update.
+	 *
+	 * An update happens on a page that a worker is already serving, so the real
+	 * `navigator.serviceWorker.controller` is non-null and the prompt fires. This
+	 * pins that relationship: the default reading of `controller` is what decides,
+	 * not a constant.
+	 */
+	it('prompts on a controlled page by reading the real controller', () => {
+		const original = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+		const controller = { scriptURL: '/sw.js', state: 'activated' };
+		Object.defineProperty(navigator, 'serviceWorker', {
+			configurable: true,
+			value: { controller }
+		});
+		try {
+			registerSW.mockImplementation(() => vi.fn(async () => {}));
+			registerServiceWorkerUpdates();
+			const options = registerSW.mock.calls[0][0] as RegisterOptions;
+
+			options.onNeedRefresh?.();
+			expect(toast).toHaveBeenCalledOnce();
+		} finally {
+			if (original) Object.defineProperty(navigator, 'serviceWorker', original);
+			else Reflect.deleteProperty(navigator, 'serviceWorker');
+		}
+	});
+
+	it('stays silent on an uncontrolled page by reading the real controller', () => {
+		const original = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+		Object.defineProperty(navigator, 'serviceWorker', {
+			configurable: true,
+			value: { controller: null }
+		});
+		try {
+			registerSW.mockImplementation(() => vi.fn(async () => {}));
+			registerServiceWorkerUpdates();
+			const options = registerSW.mock.calls[0][0] as RegisterOptions;
+
+			options.onNeedRefresh?.();
+			// This is the first-install case the Firefox/WebKit projects found.
+			expect(toast).not.toHaveBeenCalled();
+		} finally {
+			if (original) Object.defineProperty(navigator, 'serviceWorker', original);
+			else Reflect.deleteProperty(navigator, 'serviceWorker');
+		}
+	});
+
 	it('logs a registration failure without bothering the user', () => {
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const options = captureRegisterOptions();
