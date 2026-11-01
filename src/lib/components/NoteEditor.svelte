@@ -2,12 +2,15 @@
 	import { browser } from '$app/environment';
 	import { afterNavigate, beforeNavigate, goto, onNavigate } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import { tick, untrack } from 'svelte';
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Textarea } from '$lib/components/ui/textarea/index.js';
+	import { focusAfterRemoval } from '$lib/components/notes-focus';
 	import { NoteAutosave } from '$lib/notes/autosave.svelte';
 	import { formatFullDate } from '$lib/notes/date';
+	import { deleteNoteWithUndo, wasDeletedInThisTab } from '$lib/notes/delete-undo';
 	import { replaceNoteUrl } from '$lib/notes/note-url';
 	import { getNotesStore } from '$lib/notes/store-context';
 
@@ -73,6 +76,12 @@
 	let everPresent = $state(false);
 	/** A leave is in progress: keep the current UI instead of flashing a state. */
 	let departing = $state(false);
+	/**
+	 * This editor deleted its own note (#8). The record is gone on purpose, so
+	 * leaving must not write, must not delete again, and must not report the
+	 * absence as a storage failure in the list.
+	 */
+	let removedHereAlready = false;
 
 	/**
 	 * The layout loads the store it owns, so "settled" is simply "that read
@@ -87,12 +96,25 @@
 
 	type Phase = 'blank' | 'loading' | 'ready' | 'missing' | 'deleted' | 'unavailable';
 
+	/**
+	 * The note vanished, but this tab is the one that removed it.
+	 *
+	 * Recomputed whenever `stored` changes, which is exactly when the question
+	 * becomes relevant; the record it consults (#8's `deletedHere`) is written
+	 * before the delete is issued, so the answer is already `true` on the first
+	 * render after the note disappears.
+	 */
+	const removedHere = (id: string | null): boolean => id !== null && wasDeletedInThisTab(id);
+
 	const phase = $derived.by<Phase>(() => {
 		if (currentId === null) return 'blank';
 		if (stored !== null) return 'ready';
 		// While leaving, a delete we just issued ourselves must not be reported
 		// as "deleted in another tab": hold the current view until we are gone.
 		if (departing) return 'ready';
+		// Same case from the list's "⋯ → Delete": this tab deleted the note that
+		// was open, so the editor must not blame another tab for it.
+		if (everPresent && removedHere(currentId)) return 'ready';
 		if (store.status === 'error') return 'unavailable';
 		if (!settled) return 'loading';
 		return everPresent ? 'deleted' : 'missing';
@@ -120,7 +142,15 @@
 			if (browser) replaceNoteUrl(created.id);
 			return;
 		}
-		const updated = await store.updateNote(currentId, next);
+		const id = currentId;
+		// #8: a save queued before this tab deleted the note must not run. The
+		// record is gone on purpose, so there is nothing to write into, and
+		// attempting it would fail with `NoteMissingError` and leave the list
+		// reporting that storage is broken. Both signals are positive — this
+		// editor removed the note, or this tab did — never an inference from an
+		// empty list, which would also match a load still in flight.
+		if (removedHereAlready || wasDeletedInThisTab(id)) return;
+		const updated = await store.updateNote(id, next);
 		knownBody = updated.body;
 	}
 
@@ -159,6 +189,10 @@
 	}
 
 	async function depart(): Promise<void> {
+		// Already gone, by this editor's own delete (#8): there is nothing to save
+		// into and nothing left to remove. Writing here would either fail against a
+		// missing record or, worse, re-create the note the user just deleted.
+		if (removedHereAlready) return;
 		departing = true;
 
 		if (hasContent(body)) {
@@ -195,14 +229,7 @@
 	}
 
 	function focusListRow(): void {
-		const current =
-			currentId === null
-				? null
-				: document.querySelector<HTMLElement>(
-						`[data-slot="note-row"][data-note-id="${currentId}"]`
-					);
-		const first = document.querySelector<HTMLElement>('[data-slot="note-row"]');
-		(current ?? first)?.focus();
+		focusAfterRemoval(currentId);
 	}
 
 	/** `Esc` / `Ctrl+Enter`: save, then hand focus back to the list. */
@@ -244,6 +271,47 @@
 		void autosave.retry();
 	}
 
+	/**
+	 * Delete this note (#8): immediate, then a 5 s Undo.
+	 *
+	 * The pending write is **flushed first**, not dropped, and that is what makes
+	 * the Undo honest: `deleteNote` hands back the record it removed, so a flush
+	 * before it means the record already carries the text on screen. Undoing
+	 * therefore cannot resurrect an older body than the one the user was looking
+	 * at. When nothing is dirty the flush is a no-op, and a failed flush is not
+	 * fatal — the user asked for the note to go, and the record as stored is
+	 * still exactly what Undo can bring back.
+	 *
+	 * Leaving is part of the action, so this navigates to the list at every
+	 * width: the editor cannot stay on a note that is gone. `removedHereAlready`
+	 * tells the leave path that the absence is ours, so it neither writes into
+	 * the removed record nor reports it as a storage failure.
+	 */
+	async function remove() {
+		const id = currentId;
+		if (id === null) return;
+		departing = true;
+		try {
+			// The flush is a real save and must run while the note still exists:
+			// this is what makes Undo bring back the text on screen rather than
+			// the last body storage happened to have.
+			await autosave.flush();
+			// Only from here on may no write target this note: everything queued
+			// up to this point is already committed, and anything that arrives
+			// afterwards belongs to a note the user has just deleted.
+			removedHereAlready = true;
+			await deleteNoteWithUndo(store, id);
+		} catch {
+			// `deleteNoteWithUndo` already told the user; the note is still there, so
+			// this editor stays exactly where it was and keeps its text.
+			departing = false;
+			removedHereAlready = false;
+			return;
+		}
+		await goto(resolve('/'));
+		focusAfterRemoval();
+	}
+
 	// --- lifecycle -----------------------------------------------------------
 
 	// The list also loads the shared store, but the editor must not depend on a
@@ -280,6 +348,23 @@
 	// Gone elsewhere: stop writing into a note that no longer exists.
 	$effect(() => {
 		if (phase === 'deleted') autosave.stop();
+	});
+
+	// Deleted from this tab's list menu (#8) while this editor is showing it: the
+	// screen cannot stay on a note that is gone, so go back to the list. The
+	// editor's own Delete button sets `departing` and navigates itself, and a
+	// leave that is already in progress owns the navigation — hence the guard.
+	$effect(() => {
+		if (!everPresent || departing) return;
+		if (currentId === null || stored !== null) return;
+		if (!removedHere(currentId)) return;
+		// The leave that follows must not try to save into the record this tab just
+		// removed (that write would fail and put the list in an error state).
+		removedHereAlready = true;
+		void (async () => {
+			await goto(resolve('/'));
+			focusAfterRemoval();
+		})();
 	});
 
 	// A new note opens focused; an existing one does not, so opening a note on a
@@ -389,9 +474,21 @@
 				</p>
 				<!--
 					#8 DELETE ACTION SLOT — the Delete button (with its Undo toast)
-					mounts here. Deliberately empty in #7: no delete UI exists yet.
+					mounts here. #9's tabs go in their own slot above, so neither
+					issue has to restructure the other's header.
 				-->
-				<div class="hidden" data-placeholder-for="8-delete" aria-hidden="true"></div>
+				{#if currentId !== null && phase === 'ready'}
+					<Button
+						variant="ghost"
+						aria-label="Delete note"
+						data-testid="editor-delete"
+						class="min-h-11 min-w-11 px-2 text-muted-foreground hover:text-destructive"
+						onclick={remove}
+					>
+						<Trash2Icon aria-hidden="true" class="size-5 shrink-0" />
+						<span class="hidden md:inline">Delete</span>
+					</Button>
+				{/if}
 			</div>
 		</header>
 
