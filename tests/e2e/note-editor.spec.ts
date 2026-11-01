@@ -179,9 +179,38 @@ test.describe('autosave', () => {
 		const region = status(page);
 		await expect(region).toHaveAttribute('aria-live', 'polite');
 
+		/**
+		 * Watch the region instead of polling it.
+		 *
+		 * "Saving…" lasts about one debounce (~500 ms) and only until the write
+		 * lands, so sampling the text after the fact is a race — under load the
+		 * whole state can come and go between two polls, leaving the assertion
+		 * staring at "Saved" (measured: 2 failures in 6 runs on a loaded machine).
+		 * A `MutationObserver` records every value the region actually showed, so
+		 * the assertion is about the sequence the user sees, not about catching it
+		 * in the act. It is installed before the first keystroke, so no state can
+		 * be missed.
+		 */
+		await page.evaluate(() => {
+			const region = document.querySelector('[data-testid="editor-status"]');
+			if (region === null) throw new Error('the status region is not on screen');
+			const seen: string[] = [(region.textContent ?? '').trim()];
+			new MutationObserver(() => {
+				seen.push((region.textContent ?? '').trim());
+			}).observe(region, { childList: true, characterData: true, subtree: true });
+			(globalThis as { statusSeen?: string[] }).statusSeen = seen;
+		});
+
 		await page.keyboard.type('status check');
-		await expect(region).toHaveText('Saving…');
 		await expect(region).toHaveText('Saved');
+
+		const seen = await page.evaluate(
+			() => (globalThis as { statusSeen?: string[] }).statusSeen ?? []
+		);
+		// The busy state was announced…
+		expect(seen).toContain('Saving…');
+		// …and it came before the settled one, never after.
+		expect(seen.lastIndexOf('Saving…')).toBeLessThan(seen.lastIndexOf('Saved'));
 	});
 
 	test('emptying a note and leaving deletes it', async ({ page }) => {

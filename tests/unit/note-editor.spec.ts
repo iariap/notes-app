@@ -604,16 +604,18 @@ describe('keyboard', () => {
 });
 
 describe('marked slots for later issues', () => {
-	it('has a marked, empty slot for the Delete action (#8) and the view tabs (#9)', async () => {
+	it('fills the Delete slot (#8) and leaves the view tabs slot (#9) empty', async () => {
 		const id = await seed('slot host');
 		const { container } = renderEditor({ noteId: id });
 		await until(() => screen.queryByRole('textbox', { name: 'Note' }) !== null, 'textarea');
 
-		expect(container.querySelector('[data-placeholder-for="8-delete"]')).not.toBeNull();
+		// #8 replaced its placeholder with the real control; #9's is still a
+		// placeholder, so it can mount its tabs without touching this issue's work.
+		expect(container.querySelector('[data-placeholder-for="8-delete"]')).toBeNull();
 		expect(container.querySelector('[data-placeholder-for="9-view-tabs"]')).not.toBeNull();
+		expect(screen.getByRole('button', { name: 'Delete note' })).toBeInTheDocument();
 
-		// And neither feature is implemented: no delete control, no tabs, no preview.
-		expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
+		// And the preview is still #9's to build.
 		expect(screen.queryByRole('tablist')).toBeNull();
 		expect(screen.queryByRole('tab', { name: /preview/i })).toBeNull();
 	});

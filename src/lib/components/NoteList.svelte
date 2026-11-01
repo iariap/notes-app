@@ -5,12 +5,14 @@
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Tooltip, TooltipContent, TooltipProvider } from '$lib/components/ui/tooltip/index.js';
+	import { deleteNoteWithUndo } from '$lib/notes/delete-undo';
 	import type { NotesStore, NotesStatus } from '$lib/notes/notes.svelte';
 	import { derivePreview } from '$lib/notes/preview';
 	import { getNotesStore } from '$lib/notes/store-context';
 	import { deriveTitle } from '$lib/notes/title';
 	import type { Note } from '$lib/notes/types';
 	import NoteListRow from './NoteListRow.svelte';
+	import { focusAfterRemoval, neighborId } from './notes-focus';
 
 	/**
 	 * The notes list: the screen the app opens on.
@@ -97,6 +99,24 @@
 	 * full date is active.
 	 */
 	const tether = TooltipPrimitive.createTether<string>();
+
+	/**
+	 * Delete from the row's "⋯" menu, through #8's Undo window.
+	 *
+	 * One handler for the whole list (rows get the id, never a closure over the
+	 * note): 1,000 rows must not each allocate their own async delete path, and
+	 * the "where does focus go" decision belongs to the list that knows the
+	 * order. The neighbouring row is read *before* the delete for the same
+	 * reason — afterwards that note is gone from the list.
+	 *
+	 * The store's typed failure is already announced by `deleteNoteWithUndo`, so
+	 * a rejected promise here is not an unhandled one.
+	 */
+	async function deleteFromList(id: string): Promise<void> {
+		const neighbor = neighborId(notes, id);
+		await deleteNoteWithUndo(activeStore, id).catch(() => undefined);
+		focusAfterRemoval(neighbor);
+	}
 </script>
 
 <div data-slot="note-list" class="flex min-w-0 flex-col p-2">
@@ -143,6 +163,7 @@
 							active={row.note.id === activeNoteId}
 							{now}
 							{tether}
+							onDelete={deleteFromList}
 						/>
 					</li>
 				{/each}

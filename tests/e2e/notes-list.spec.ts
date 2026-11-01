@@ -355,6 +355,11 @@ test.describe('accessibility', () => {
 		await first.focus();
 		await expect(first).toBeFocused();
 
+		// Since #8 each row contributes two stops: the note link, then its "⋯"
+		// menu. Tabbing twice must reach the next row's link, so every note (and
+		// its actions) is reachable without a pointer.
+		await page.keyboard.press('Tab');
+		await expect(page.locator('[data-testid="note-row-menu"]').nth(0)).toBeFocused();
 		await page.keyboard.press('Tab');
 		await expect(rows(page).nth(1)).toBeFocused();
 	});

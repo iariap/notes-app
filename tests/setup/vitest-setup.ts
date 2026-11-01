@@ -20,3 +20,20 @@ if (!globalThis.ResizeObserver) {
 
 	globalThis.ResizeObserver = ResizeObserverStub;
 }
+
+// jsdom does not implement `matchMedia` either, and `svelte-sonner`'s toaster
+// asks for the colour-scheme preference on mount. The stub answers "no match"
+// for every query, so a component that only distinguishes light from dark
+// renders its light branch — which is what the tests assert on.
+if (!globalThis.matchMedia) {
+	globalThis.matchMedia = ((query: string) => ({
+		matches: false,
+		media: query,
+		onchange: null,
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		addListener: () => {},
+		removeListener: () => {},
+		dispatchEvent: () => false
+	})) as unknown as typeof globalThis.matchMedia;
+}

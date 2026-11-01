@@ -226,14 +226,18 @@ describe('updateNote', () => {
 		expect(notes.notes[0].body).toBe('first edited');
 	});
 
-	it('leaves state untouched when the note is missing', async () => {
+	it('leaves the list intact when the note disappeared mid-write', async () => {
 		const notes = makeStore();
 		await notes.createNote('kept');
 		const before = notes.notes;
 
+		// #8: this is the shape of "deleted while a save was pending". The record
+		// is gone on purpose, so the list is still correct and must not be
+		// replaced by an error state; the typed error reaches the caller.
 		await expect(notes.updateNote('ghost', 'x')).rejects.toBeInstanceOf(NoteMissingError);
 
 		expect(notes.notes).toBe(before);
+		expect(notes.status).toBe('ready');
 		expect(notes.error).toBeInstanceOf(NoteMissingError);
 	});
 });

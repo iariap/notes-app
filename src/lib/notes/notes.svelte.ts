@@ -85,7 +85,23 @@ export class NotesStore {
 	}
 
 	async updateNote(id: string, body: string): Promise<Note> {
-		const note = await this.#guard(() => this.#repository.updateNote(id, body));
+		let note: Note;
+		try {
+			note = await this.#repository.updateNote(id, body);
+		} catch (error) {
+			// A record that disappeared between the read and the write (#8: this
+			// tab, or another one, deleted it) is a lost race, not a broken store:
+			// the list is intact and `notes` is already right, so flipping
+			// `status` to `error` would replace a healthy list with "Couldn't load
+			// your notes". The typed error still reaches the caller, and the last
+			// failure stays visible in `error` for anyone inspecting it.
+			if (error instanceof NoteMissingError) {
+				this.error = error;
+				throw error;
+			}
+			this.#fail(error);
+			throw error;
+		}
 		this.#revision += 1;
 		this.notes = sortNotes([...this.notes.filter((current) => current.id !== note.id), note]);
 		this.status = 'ready';
