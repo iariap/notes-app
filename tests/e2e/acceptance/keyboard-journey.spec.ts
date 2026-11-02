@@ -186,19 +186,16 @@ test.describe('keyboard-only journey', () => {
 		await expect(editorBody(page)).toHaveValue('# Keyboard note\n\n- [ ] milk');
 	});
 
-	// ## Known failure: focus is not restored after Undo (#26)
+	// ## Focus after Undo (#26)
 	//
-	// `test.fixme` marks a test that is expected to fail: it is reported as
-	// `fixme` and does not fail the run, but unlike `skip` it still shows up, and
-	// the assertion inside is the real requirement rather than a comment. That is
-	// the honest state of this gap — measured, reported in #26, not silently
-	// asserted as correct.
+	// This used to be a `test.fixme`: focus really did end on `<body>`, because
+	// nothing asked for it to be moved. The hand-off lives in the undo path now,
+	// so the same assertion is a real test.
 	//
 	// Why it is a separate test rather than a line in the journey above: the
 	// journey covers ten other things, and marking *it* known-failing would hide
-	// all of them. Here the single claim is isolated, so when #26 is fixed the
-	// only edit is deleting the `.fixme`.
-	test.fixme('after Undo, focus is not left on <body> (defect: #26)', async ({ page }) => {
+	// all of them. Here the single claim is isolated.
+	test('after Undo, focus is not left on <body> (defect: #26)', async ({ page }) => {
 		await page.goto('/notes/new');
 		await hydration(page);
 		await page.keyboard.type('a note to delete and restore');

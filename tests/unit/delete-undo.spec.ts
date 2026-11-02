@@ -13,6 +13,7 @@ import {
 	wasDeletedInThisTab,
 	type ToastNotifier
 } from '$lib/notes/delete-undo';
+import { focusAfterRemoval } from '$lib/components/notes-focus';
 import { NotesStore } from '$lib/notes/notes.svelte';
 import { createNotesRepository, type NotesRepository } from '$lib/notes/repository';
 import type { NotesSync } from '$lib/notes/sync';
@@ -490,6 +491,239 @@ describe('finalizeAllUndoWindows', () => {
 		await settle();
 		expect(await repository.getNote(first.id)).toBeUndefined();
 		expect(await repository.getNote(middle.id)).toBeUndefined();
+	});
+});
+
+describe('focus after Undo (#26)', () => {
+	/**
+	 * The list markup `focusAfterRemoval` queries, plus a toaster holding one
+	 * toast with an Undo button — the shape sonner renders.
+	 */
+	function mountList(ids: readonly string[]): HTMLElement {
+		document.body.innerHTML = `
+			<div data-slot="note-list">
+				${ids
+					.map((id) => `<a href="/notes/${id}" data-slot="note-row" data-note-id="${id}">${id}</a>`)
+					.join('')}
+			</div>
+			<ol data-sonner-toaster>
+				<li data-sonner-toast><button data-button type="button">Undo</button></li>
+			</ol>
+		`;
+		return document.querySelector<HTMLElement>('[data-sonner-toast] [data-button]')!;
+	}
+
+	const row = (id: string): HTMLElement | null =>
+		document.querySelector<HTMLElement>(`[data-slot="note-row"][data-note-id="${id}"]`);
+
+	/** Frames the hand-off is allowed to use, so a move that lands late is seen. */
+	async function settleFrames(count = 12): Promise<void> {
+		for (let index = 0; index < count; index += 1) {
+			await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+		}
+	}
+
+	/**
+	 * Presses a sent toast's Undo through the button sonner wires the handler to.
+	 *
+	 * Sonner's own handler is registered on the button for this press, so the
+	 * browser supplies the button as the event's `currentTarget` — exactly what
+	 * the real toast does, and what the module reads to know which toast is being
+	 * dismissed. A keyboard `Enter` on a `<button>` dispatches this same click.
+	 */
+	function pressUndoOnButton(data: ExternalToast): void {
+		const action = data.action;
+		if (action === undefined || typeof action === 'function') {
+			throw new Error('the toast has no action to press');
+		}
+		const button = undoTarget();
+		button.addEventListener(
+			'click',
+			(event: MouseEvent) => {
+				// Sonner's handler is typed against the action button it is wired to,
+				// and during a real dispatch the browser supplies that button as
+				// `currentTarget` — which is the whole point of dispatching here.
+				action.onClick(event as MouseEvent & { currentTarget: EventTarget & HTMLButtonElement });
+			},
+			{ once: true }
+		);
+		button.click();
+	}
+
+	/** The Undo button currently rendered in the (single) toast. */
+	function undoTarget(): HTMLButtonElement {
+		return document.querySelector<HTMLButtonElement>('[data-sonner-toast] [data-button]')!;
+	}
+
+	afterEach(() => {
+		document.body.innerHTML = '';
+	});
+
+	it('lands on the restored note’s row, from the keyboard on the Undo button', async () => {
+		const [, middle] = await seedThree();
+		const toaster = fakeToaster();
+		mountList([]);
+
+		await deleteNoteWithUndo(store, middle.id, { notify: toaster });
+		// The rows the restore brings back, rendered by the time Undo is pressed:
+		// this is the state the real list is in, one read later.
+		mountList([middle.id]);
+		const button = undoTarget();
+		button.focus();
+		expect(document.activeElement).toBe(button);
+
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+
+		// The hand-off runs after the dismissal, and `focusAfterRemoval` may retry
+		// over a few frames while the list settles.
+		await settleFrames();
+		expect(document.activeElement).toBe(row(middle.id));
+	});
+
+	it('dismisses the toast and then hands focus to the restored row', async () => {
+		// The observable order: the dismissal happens, focus is released from the
+		// dying toast, and then the row is focused. Asserted because it is what the
+		// code promises — *not* because the order is what makes the move stick:
+		// handing off before the dismissal also survives (measured, see the module
+		// comment). What makes it stick is the release, asserted separately.
+		const [, middle] = await seedThree();
+		const order: string[] = [];
+		const toaster = fakeToaster();
+		const dismiss = toaster.dismiss;
+		toaster.dismiss = vi.fn((id?: string | number) => {
+			order.push('dismiss');
+			return dismiss(id);
+		});
+
+		await deleteNoteWithUndo(store, middle.id, { notify: toaster });
+		mountList([middle.id]);
+		const button = undoTarget();
+		button.focus();
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+
+		// Both happened, in that order, and the end state is the restored row.
+		expect(order).toEqual(['dismiss']);
+		expect(document.activeElement).toBe(row(middle.id));
+	});
+
+	it('leaves focus alone when the restore fails', async () => {
+		// Nothing came back, so there is no row of the note to land on, and the
+		// user is being told about the failure rather than moved elsewhere.
+		const [note] = await seedThree();
+		const toaster = fakeToaster();
+		mountList(['a', 'b']);
+		const elsewhere = row('a')!;
+		vi.spyOn(store, 'restoreNote').mockRejectedValueOnce(new StorageFullError('No room.'));
+
+		await deleteNoteWithUndo(store, note.id, { notify: toaster });
+		elsewhere.focus();
+		expect(document.activeElement).toBe(elsewhere);
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+
+		expect(document.activeElement).toBe(elsewhere);
+		vi.restoreAllMocks();
+	});
+
+	it('the release from the dying toast is what makes the hand-off work', async () => {
+		// The crux, isolated. Focus is *on the toast's own button* when Undo is
+		// pressed, which is what `focusAfterRemoval`'s guard must not read as "a
+		// live owner outranks this cleanup". Reproduce the refusal to prove the
+		// release is load-bearing: with the button focused and no release, the row
+		// is never focused.
+		const [, middle] = await seedThree();
+		const toaster = fakeToaster();
+		await deleteNoteWithUndo(store, middle.id, { notify: toaster });
+		mountList([middle.id]);
+		const button = undoTarget();
+		button.focus();
+
+		// What the guard does on its own: focus is not on <body>, so it stops.
+		focusAfterRemoval(middle.id);
+		await settleFrames();
+		expect(document.activeElement, 'the guard alone refuses, as it should').toBe(button);
+
+		// With the release first — what the module does — the row is reached.
+		button.blur();
+		focusAfterRemoval(middle.id);
+		await settleFrames();
+		expect(document.activeElement).toBe(row(middle.id));
+
+		// And through the real path, from the same starting focus.
+		mountList([middle.id]);
+		const fresh = undoTarget();
+		fresh.focus();
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+		expect(document.activeElement).toBe(row(middle.id));
+	});
+
+	it('does not touch focus outside the dismissing toast (#21)', async () => {
+		// Two windows open: a mouse click on *one* toast's Undo must not drag focus
+		// out of the *other* toast, which is what #21 protects.
+		const [first, middle] = await seedThree();
+		const toaster = fakeToaster();
+		mountList([first.id, middle.id]);
+		const otherToast = document.createElement('li');
+		otherToast.setAttribute('data-sonner-toast', '');
+		const otherButton = document.createElement('button');
+		otherButton.type = 'button';
+		otherButton.textContent = 'Undo';
+		otherToast.append(otherButton);
+		document.querySelector('[data-sonner-toaster]')!.append(otherToast);
+
+		await deleteNoteWithUndo(store, first.id, { notify: toaster });
+		await deleteNoteWithUndo(store, middle.id, { notify: toaster });
+
+		// The user is reading the *second* toast; the press comes from elsewhere.
+		otherButton.focus();
+		expect(document.activeElement).toBe(otherButton);
+
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+
+		expect(document.activeElement).toBe(otherButton);
+	});
+
+	it('lands on the only row when the restored note is the whole list', async () => {
+		const [note] = await seedThree();
+		const toaster = fakeToaster();
+		mountList([]);
+
+		await deleteNoteWithUndo(store, note.id, { notify: toaster });
+		mountList([note.id]);
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+
+		expect(document.activeElement).toBe(row(note.id));
+	});
+
+	it('does not act when the window already expired', async () => {
+		// A late press must be inert for focus too, not just for storage.
+		const [note] = await seedThree();
+		const toaster = fakeToaster();
+		mountList(['a']);
+		const elsewhere = row('a')!;
+
+		await deleteNoteWithUndo(store, note.id, { notify: toaster });
+		await vi.advanceTimersByTimeAsync(UNDO_WINDOW_MS + 1);
+		await settle();
+		elsewhere.focus();
+		expect(document.activeElement).toBe(elsewhere);
+
+		pressUndoOnButton(toaster.sent[0].data);
+		await settle(2);
+		await settleFrames();
+
+		expect(document.activeElement).toBe(elsewhere);
+		expect(await repository.getNote(note.id)).toBeUndefined();
 	});
 });
 
