@@ -7,10 +7,12 @@
 			variant: {
 				default: 'bg-card text-card-foreground',
 				// The description used to be `text-destructive/90`, which over white
-				// lands at 4.49:1 — under WCAG AA's 4.50:1 for normal-size text, and
-				// a real failure rather than a rounding artefact (measured in all
-				// three engines by #11). Full-strength `text-destructive` is 4.77:1,
-				// so the alert keeps its emphasis without dropping below AA.
+				// landed under WCAG AA's 4.50:1 for normal-size text — a real failure
+				// rather than a rounding artefact (measured in all three engines by
+				// #11). #11 dropped the modifier here; #22 then darkened the token
+				// itself, so the description is now 5.23:1 full strength and would be
+				// 4.93:1 even at `/90`. Full-strength `text-destructive` keeps the
+				// emphasis with headroom instead of a knife-edge pass.
 				destructive:
 					'text-destructive bg-card *:data-[slot=alert-description]:text-destructive *:[svg]:text-current'
 			}
