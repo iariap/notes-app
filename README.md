@@ -134,6 +134,11 @@ Configuration lives in `components.json`; global styles and CSS variables in `sr
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`: install
-(`--frozen-lockfile`), lint, type-check, unit tests, build, then Playwright Chromium and the E2E
-suite. The Playwright report is uploaded as an artifact when the job fails.
+`.github/workflows/ci.yml` is the merge gate: it runs on every pull request and on pushes to
+`main` — install (`--frozen-lockfile`), lint, type-check, unit tests, build, then Playwright
+Chromium and the E2E suite. The Playwright report is uploaded as an artifact when the job fails.
+
+`.github/workflows/e2e-full.yml` is additional evidence, not a gate: it runs the full six-project
+matrix on every push to `main` and on PRs labelled `full-e2e`. It is a separate workflow so that a
+PR which is not labelled produces no matrix check run at all, rather than one reported as `skipped`
+(`scripts/merge.sh` rejects a check name whose entries are all `skipped`).

@@ -1,0 +1,183 @@
+name: E2E full matrix
+
+# The full browser matrix: desktop on Chromium, Firefox and WebKit; tablet on
+# Chromium; mobile as Pixel 7 (Chromium) and iPhone 14 (WebKit).
+#
+# ## Where it runs
+#
+# - **Every push to `main`.** That is the epic's "the full matrix passes on
+#   `main`".
+# - **A PR labelled `full-e2e`.** Applying the label runs it against the PR merge
+#   ref, so it tests what would actually land.
+# - Nowhere else. A PR that is never labelled `full-e2e` never executes the
+#   matrix.
+#
+# ## Why this file exists instead of a second job in `ci.yml`
+#
+# It *was* a second job in `ci.yml`, guarded by
+# `if: github.event_name == 'push'`. On a `pull_request` event such a job is not
+# absent — GitHub publishes a check run for it with the `skipped` conclusion, on
+# **every** PR. The factory's merge gate (`scripts/merge.sh`) treats a name whose
+# entries are all SKIPPED as not green ("un check que no corrió no es un gate"),
+# so every PR carried a permanently failing check for a suite that is optional by
+# design. Reproduced on PR #24:
+#
+#   - e2e full matrix (chromium + firefox + webkit)=skipped
+#
+# A job that can only ever be skipped for an event must not be defined for that
+# event. `ci.yml` no longer mentions the matrix at all.
+#
+# ## Invariants (restated in `ci.yml` too — keep both in sync)
+#
+# 1. A normal PR is gated by a real, always-run `ci` job in `ci.yml` (lint,
+#    `svelte-check`, unit tests, build, Chromium matrix). It has no `if:` and is
+#    never skipped.
+# 2. The full matrix runs on `main` (every push) and on PRs labelled `full-e2e`.
+# 3. **No PR ever reports a `skipped` check.** A workflow that does not run for an
+#    event produces no check run at all — never a skipped one. For events this
+#    workflow *is* subscribed to, the job always executes at least one step, so its
+#    conclusion is never `skipped` either (see the `decide` step).
+#
+# ## Why the label test is in a *step*, not in the job's `if:`
+#
+# GitHub cannot filter a `pull_request` trigger by label name: there is no
+# `types: [labeled:full-e2e]`. Subscribing to `labeled` means subscribing to
+# *every* label, and which label arrived is only knowable from the payload once
+# the workflow has started. Deciding that with a job-level `if:` is exactly the
+# bug documented above: the job reports `skipped` and poisons the merge gate of a
+# PR that merely received a `bug` label.
+#
+# So the decision is made in a step, which can only ever skip *steps* (harmless,
+# they publish nothing) and never the job. The `decide` step deliberately has no
+# `if:` of its own: it must always run, because a job whose steps are *all*
+# skipped is itself reported as `skipped`, which is the outcome invariant 3
+# forbids. With one step always executing, the job concludes `success`.
+#
+# The price is that an unrelated label still allocates a runner for a ~10s no-op,
+# and that run is reported. Reporting it honestly is the lesser evil: the job
+# name is computed from the same condition, so a run that did not execute the
+# matrix never publishes a check named as if it had. Publishing nothing at all is
+# impossible for an event the workflow is subscribed to, and a green check under
+# the matrix's own name would be the same lie in a nicer colour.
+#
+# ## Why the matrix check keeps one name across both real paths
+#
+# `push`/`main` and `labeled`/PR publish the same name,
+# `e2e full matrix (chromium + firefox + webkit)`. They cannot collide: the push
+# path is restricted to `main` by the `branches:` filter, and the label path
+# reports on a PR merge ref, which is a commit that never exists on `main`. So
+# for any given commit exactly one of them can report. Keeping the name
+# byte-identical to the one the old `ci.yml` job published on `main` means a
+# future required-check entry written against that name keeps matching.
+#
+# Do **not** make it a required check anyway: on a PR it fires only on a label,
+# so most PRs would wait forever for a check that is never reported. `ci` is the
+# gate; this is additional evidence and never replaces `ci`'s verdict.
+on:
+  pull_request:
+    types: [labeled]
+  push:
+    branches: [main]
+
+# Least privilege: the matrix only needs to read the code.
+permissions:
+  contents: read
+
+# One in-flight run per PR (label path) or per ref (push path). A different
+# `github.workflow` from `ci.yml`, so this can never cancel a `ci` run and vice
+# versa. Within this workflow, a second label application for the same PR
+# supersedes its own previous run — same commit, so cancelling the older
+# duplicate is correct.
+concurrency:
+  group: e2e-full-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-full:
+    # Two distinct names from one condition, so the check list never claims the
+    # matrix ran when it did not:
+    #   - push to `main`, or the `full-e2e` label → the matrix's own name;
+    #   - any other label                         → a name that says so.
+    name: ${{ (github.event_name == 'push' || github.event.label.name == 'full-e2e') && 'e2e full matrix (chromium + firefox + webkit)' || 'e2e full matrix (not requested by this label)' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+    steps:
+      # The only step without a condition, and the reason this job is never
+      # reported as `skipped`. See "Why the label test is in a *step*" above.
+      #
+      # `push` is always a `main` push (branch filter in `on:`), so it always
+      # runs. On a PR, only the `full-e2e` label requests the matrix.
+      - name: Decide whether this event requests the full matrix
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "push to main: the full matrix is required."
+          elif [ "$LABEL" = "full-e2e" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "PR labelled full-e2e: running the full matrix."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "label '${LABEL}' does not request the full matrix; nothing runs."
+          fi
+
+      # Default checkout — the PR *merge* ref, deliberately matching `ci.yml`.
+      #
+      # Do not pin `github.event.pull_request.head.sha` here. The gate tests the
+      # merge commit (what would actually land); pinning the raw head would make
+      # this run test a different tree, so a green label run could coexist with a
+      # red `ci` on the same PR — precisely the confusion this job is meant to
+      # remove. `pull_request` refs are the same for every action type, so the
+      # default is correct for `labeled` too.
+      - uses: actions/checkout@v7
+        if: steps.decide.outputs.run == 'true'
+
+      - uses: pnpm/action-setup@v6
+        if: steps.decide.outputs.run == 'true'
+
+      - uses: actions/setup-node@v7
+        if: steps.decide.outputs.run == 'true'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        if: steps.decide.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        if: steps.decide.outputs.run == 'true'
+        run: pnpm build
+
+      # Firefox and WebKit each need their own binary plus system libraries.
+      # `--with-deps` installs those libs; Chromium is included so a single step
+      # guarantees the whole matrix is present.
+      - name: Install Playwright browsers
+        if: steps.decide.outputs.run == 'true'
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # `pnpm test:e2e:full` is `playwright test` with no `--project` filter, so
+      # it runs every project in playwright.config.ts — byte-identical for the
+      # `main` push and the label paths, so the two cannot disagree about what
+      # "the full matrix" means.
+      #
+      # The Chromium projects repeat here on purpose: this job's verdict has to
+      # stand on its own, not depend on artefacts from `ci`.
+      - name: E2E tests (full matrix)
+        if: steps.decide.outputs.run == 'true'
+        run: pnpm test:e2e:full
+
+      - name: Upload Playwright report
+        if: failure() && steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-full
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

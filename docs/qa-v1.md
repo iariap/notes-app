@@ -27,6 +27,9 @@ suffixed with their engine.
 | `desktop-webkit`  | WebKit (Safari engine) | 1280×800 | mouse                             | `main` + PRs labelled `full-e2e` |
 | `mobile-webkit`   | WebKit (iPhone 14)     | 375×667  | touch, `isMobile`, coarse pointer | `main` + PRs labelled `full-e2e` |
 
+See [§1](#ci-what-gates-a-merge) for the workflows that run these, and for the
+invariant that no unlabelled PR ever reports a `skipped` check.
+
 **Viewport coverage per story.** Every story spec runs in all six projects, so
 each row below is proven at 375, 768 and 1280 px in Chromium **and** at 375 px in
 WebKit / 1280 px in Firefox and WebKit. The five-width sweep (320/375/768/1280/1920)
@@ -54,22 +57,44 @@ with its reason at the call site.
 
 ### CI: what gates a merge
 
-Two workflow files, two jobs.
+Two workflow files, one job each.
 
 - **`ci` — the gate.** In `.github/workflows/ci.yml`. Runs on **every pull
   request** (`opened`, `synchronize`, `reopened`) **and every push to `main`**:
   install, lint, `svelte-check`, unit tests, build, then the Chromium matrix
   (`pnpm test:e2e` → `desktop` + `tablet` + `mobile`). It has no `if:`, so it is
   never skipped.
-- **`e2e-full` — additional.** In the same file. Runs on `main` (every push).
-  Installs Chromium + Firefox + WebKit and runs `pnpm test:e2e:full` (all six
-  projects).
+- **`e2e-full` — additional.** In `.github/workflows/e2e-full.yml`. Runs on
+  `main` (every push) **and** on PRs labelled `full-e2e`. Installs Chromium +
+  Firefox + WebKit and runs `pnpm test:e2e:full` (all six projects), check
+  `e2e full matrix (chromium + firefox + webkit)`.
 
-The full matrix also runs on a PR **when it is labelled `full-e2e`**, but from a
-separate workflow: `.github/workflows/e2e-full-on-label.yml`, check
-`e2e full matrix, labelled (chromium + firefox + webkit)`.
+**No PR reports a `skipped` check.** That is an invariant of this structure, not
+an accident: `scripts/merge.sh` treats a check name whose entries are all
+`SKIPPED` as not green. The matrix job used to be a second job in `ci.yml` with
+`if: github.event_name == 'push'`, which on a `pull_request` event still publishes
+a check run — with the `skipped` conclusion — on every PR, permanently blocking
+the merge gate. A job that can only ever be skipped for an event must not be
+defined for that event, so `push`-to-`main` moved to `e2e-full.yml` and `ci.yml`
+no longer mentions the matrix.
 
-Why a separate file, and not just `types: [..., labeled]` on `ci.yml`:
+| event                              | `ci`   | full matrix             | skipped checks |
+| ---------------------------------- | ------ | ----------------------- | -------------- |
+| push to `main`                     | runs   | runs                    | none           |
+| PR opened / synchronize / reopened | runs   | no run                  | none           |
+| PR labelled `full-e2e`             | no run | runs                    | none           |
+| PR labelled anything else          | no run | runs a no-op, `success` | none           |
+
+The last row is the one that needs explaining. GitHub cannot filter a
+`pull_request` trigger by label name (there is no `types: [labeled:full-e2e]`), so
+every label starts the workflow and the label can only be inspected afterwards.
+Doing that in the job's `if:` is the bug this fix removes — the job would report
+`skipped`. Instead a `decide` step always runs and sets an output that gates the
+remaining steps, so the job concludes `success` and the check is named
+`e2e full matrix (not requested by this label)`. It never claims the matrix ran.
+
+Why the label lives in its own workflow, and not just `types: [..., labeled]` on
+`ci.yml`:
 
 - `labeled` fires for **every** label, so adding it to `ci.yml` would re-run the
   ~5-minute gate for `bug`, `docs`, `p1`, ….
@@ -83,15 +108,20 @@ Why a separate file, and not just `types: [..., labeled]` on `ci.yml`:
   that never triggers cannot satisfy a required check. It also has its own
   concurrency group, so it cannot cancel an in-flight `ci`.
 
-Neither the label workflow nor `e2e-full` is — or can be — a required check: they
-fire on a label (or on `main`), so requiring them would block every PR until
-someone acted. **`ci` is the gate** and is a real, full Chromium matrix; the
-default job was deliberately _not_ made to skip. The extra engines are additional
-evidence, never a condition of merging by their absence.
+`e2e-full` is not — and cannot be — a required check: on a PR it fires only on a
+label, so requiring it would block every PR until someone acted. **`ci` is the
+gate** and is a real, full Chromium matrix; the gate job was deliberately _not_
+made to skip. The extra engines are additional evidence, never a condition of
+merging by their absence.
 
-_This section previously claimed the label "runs on PRs labelled `full-e2e`"
-while `ci.yml` had no `labeled` trigger — the label produced no run at all. Fixed
-in the PR that added `.github/workflows/e2e-full-on-label.yml`._
+_This section previously described the matrix as a second job inside `ci.yml`,
+guarded by `if: github.event_name == 'push'`. That job published a `skipped`
+check on every PR, which `merge.sh` rejects — the regression this section now
+documents the fix for. Before that, it claimed the label "runs on PRs labelled
+`full-e2e`" while `ci.yml` had no `labeled` trigger, so the label produced no run
+at all; the label trigger was moved to its own workflow file, since renamed from
+`e2e-full-on-label.yml` to `e2e-full.yml` once it also took over the `main`
+push._
 
 ### Measured durations (this machine, macOS arm64)
 
@@ -597,9 +627,10 @@ question automation cannot settle.
 
 5. **CI wall-clock on GitHub runners.** The durations in §1 are from this
    machine. The `e2e-full` job has a 40-minute timeout against a 2 m 55 s local
-   run, which should be ample, but the **real CI duration is unverified until the
-   first `main` run** — no cloud run was made from this worktree (the issue says
-   not to push).
+   run, which should be ample. The labelled path has since been observed on a real
+   runner at **12 m 23 s** (PR #24, 916 passed), well inside the timeout; the
+   **`main` push path is still unverified** — it only exists once these workflow
+   files are on `main`, and no `main` run was made from this worktree by design.
 
 6. **`#22` (destructive token contrast) needs an owner decision** — darkening the
    red is a brand change, not a QA fix.
@@ -640,18 +671,23 @@ question automation cannot settle.
 9. **`full-e2e` is not a required check** (by design — see §1). If the owner
    wants the full matrix to gate merges, the mechanism has to be a scheduled or
    `main`-only gate, or a required check that runs cheaply on every PR; that is a
-   process decision for `#1`. Note the label workflow publishes a _differently
-   named_ check from `ci.yml`'s `main` job on purpose, so the two can never be
-   mistaken for one another.
+   process decision for `#1`. The matrix check keeps the same name on `main` and
+   on a labelled PR, which cannot collide (the push path is filtered to `main`;
+   the label path reports on a PR merge ref), and a non-`full-e2e` label reports a
+   distinctly named `success` check so it is never mistaken for a matrix run.
 
 10. **The label trigger was broken and the docs said otherwise.** `ci.yml` had no
     `labeled` in its `pull_request.types`, so applying `full-e2e` produced no run
     at all (observed on PR #23: label applied, matrix job still `skipping` from the
-    original push). Fixed by moving the trigger to
-    `.github/workflows/e2e-full-on-label.yml`; see §1. **Unverified end to end:**
-    the fix only takes effect once the workflow file is on the PR's head — a
-    workflow added by a PR does not run for that PR's own label events. It needs
-    one real label event _after_ this lands to be confirmed live.
+    original push). Fixed by moving the trigger to its own workflow file, now
+    `.github/workflows/e2e-full.yml`; see §1. Confirmed live on PR #24 (the
+    labelled check ran, 916 passed). **What was still broken after that fix**, and
+    is fixed here: the `main`-only matrix job left behind in `ci.yml` reported
+    `skipped` on every PR and blocked `merge.sh` on PR #24. **Unverified end to
+    end:** the fix takes effect only once the workflow files are on `main` — a
+    workflow added by a PR does not run for that PR's own label events, and the
+    `push` trigger for this file cannot be exercised before it lands. It needs one
+    real `main` push and one label event _after_ merging to be confirmed live.
 
 11. **The 1,000-note render gate had three defects; all three are fixed.** Kept in
     the record because each one masked the next, and each is something a reader
