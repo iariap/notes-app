@@ -129,9 +129,9 @@ test.describe('story 5 — Notes survive closing the browser', () => {
 					await expect(editorStatus(page)).toHaveText('Saved');
 					// A fresh create per iteration, so three distinct ids and three
 					// distinct created dates exist to compare after the relaunch.
-					// The header title is an in-app navigation at every width; the
-					// `Ctrl+Enter` shortcut only leaves the note below `md` (a known
-					// limitation recorded in docs/qa-v1.md), so it is not used here.
+					// The header title is an in-app navigation at every width; from
+					// `md` up `Ctrl+Enter` only hands focus to the list (the editor
+					// stays on screen beside it), so it is not used here.
 					await leaveEditor();
 					await openNewNote();
 				}

@@ -294,11 +294,17 @@ decision. Includes measured candidate values.
    the theme are unreachable in a real session, which is why #22 scopes itself to
    the light token.)
 
-2. **`Esc` / `Ctrl+Enter` at `md+` does not return focus to the list.** Verified:
-   the note _is_ saved, but focus stays in the editor. Below `md` both keys
-   navigate. Carried over from `#8`/`#21`. Every #11 test that needs to leave a
-   note at `md+` uses the header title link, which works at all widths — the
-   limitation is recorded, not routed around in production code.
+2. ~~**`Esc` / `Ctrl+Enter` at `md+` does not return focus to the list.**~~
+   **Fixed in `fix/7-esc-focus`.** It was verified here: the note _was_ saved, but
+   focus stayed in the editor. The cause was the editor staying mounted at `md+`
+   with its textarea still focused, and `focusAfterRemoval` (#21) correctly
+   refusing to take focus from anything other than `<body>`. The editor now
+   releases focus before handing it over; the guard is unchanged. Regression
+   tests: `note-editor.spec.ts` "at md+ Esc / Ctrl+Enter moves focus to the row
+   of the open note", plus the two unit cases. Note this changed _focus_, not
+   navigation: below `md` both keys still navigate, and from `md` up the editor
+   still stays open beside the list — so the #11 tests that leave a note at `md+`
+   keep using the header title link, because they need a route change.
 
 3. **Two Playwright suites in one worktree share one build dir.** `E2E_PORT`
    isolates the server but not `build/`. Carried over from `#8`. Mitigation used

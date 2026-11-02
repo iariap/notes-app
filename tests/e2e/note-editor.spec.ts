@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { isNarrow } from './helpers/keyboard';
+import { seedNote, seedNotes } from './helpers/seed';
 
 /**
  * Issue #7: the note editor and its autosave.
@@ -344,6 +345,62 @@ test.describe('keyboard and layout', () => {
 			expect(note.body).toBe('typed before ctrl-enter');
 		}).toPass();
 	});
+
+	/**
+	 * The `md+` half of the same contract (#7): "on `≥ md` `Esc` moves focus to
+	 * the list item".
+	 *
+	 * At `md+` the editor stays mounted next to the list, so nothing removes the
+	 * textarea from the document and the browser has no reason to move focus on
+	 * its own — the hand-off is the editor's to make. Focus is asserted on the
+	 * row *of the note that was open*, which is what makes the assertion about
+	 * the open note rather than about "some row"; `toBeFocused` retries, so the
+	 * frames `focusAfterRemoval` is allowed to wait are not raced. The stored
+	 * body is asserted too, so the move cannot have been paid for by dropping the
+	 * save it had to flush first.
+	 */
+	for (const [label, key] of [
+		['Esc', 'Escape'],
+		['Ctrl+Enter', 'Control+Enter']
+	] as const) {
+		test(`at md+ ${label} moves focus to the row of the open note`, async ({ page }) => {
+			test.skip(isNarrow(page), 'below md the shortcut navigates; asserted above');
+
+			const now = Date.now();
+			const seeded = await seedNotes(page, [
+				seedNote(1, 'First note', new Date(now - 30 * 60_000).toISOString()),
+				seedNote(2, 'Second note', new Date(now - 20 * 60_000).toISOString())
+			]);
+			const target = seeded[1];
+
+			await page.goto(`/notes/${target.id}`);
+			await hydration(page);
+
+			// An existing note opens *without* focus (so a phone does not raise
+			// the keyboard), so the caret is placed the way a user would.
+			const editor = body(page);
+			await editor.focus();
+			await expect(editor).toBeFocused();
+			await page.keyboard.press('End');
+			await page.keyboard.type(' plus a keystroke');
+
+			await page.keyboard.press(key);
+
+			await expect(
+				page.locator(`[data-slot="note-row"][data-note-id="${target.id}"]`),
+				`${label} at md+ must leave focus on the note's own row`
+			).toBeFocused();
+			// Not on the editor it came from, and not dropped on the document.
+			await expect(editor).not.toBeFocused();
+			// The note stayed open (the list is already on screen), and the text
+			// on screen is what storage holds: the flush happened first.
+			await expect(page).toHaveURL(new RegExp(`/notes/${target.id}$`));
+			await expect(async () => {
+				const stored = (await storedNotes(page)).find((note) => note.id === target.id);
+				expect(stored?.body).toBe('Second note plus a keystroke');
+			}).toPass();
+		});
+	}
 
 	test('mobile: full-screen editor, no horizontal scroll, caret line reachable', async ({
 		page

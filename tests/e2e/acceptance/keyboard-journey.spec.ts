@@ -178,8 +178,9 @@ test.describe('keyboard-only journey', () => {
 		// without a tab stop would slip past it; this walk proves each row's link
 		// and its menu are both reachable, and in that order.
 		// Two notes, created and left entirely from the keyboard. Leaving uses the
-		// header title link: `Ctrl+Enter` only navigates below `md` (a known
-		// limitation in docs/qa-v1.md), and this test must hold at every width.
+		// header title link: from `md` up `Ctrl+Enter` only hands focus back to the
+		// list (it does not navigate — the editor stays on screen beside it), so it
+		// cannot take this walk to `/`, which it needs at every width.
 		const leaveEditor = async () => {
 			const title = page.getByRole('heading', { level: 1 }).getByRole('link', { name: 'Notes' });
 			await title.focus();
