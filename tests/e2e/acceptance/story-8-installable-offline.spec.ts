@@ -95,25 +95,60 @@ test.describe('story 8 — Installable, offline', () => {
 		// Record the call rather than reading its result: whether the browser
 		// grants persistence is a policy decision (and is `false` for an
 		// uninstalled site in several engines), while *asking* is the criterion.
+		//
+		// ## Why this patches `StorageManager.prototype`, not the instance
+		//
+		// The first version did `navigator.storage.persist = ...`, and it was flaky
+		// in WebKit only under parallel load (~5 of 6 runs never saw a call). The
+		// descriptor is not the problem: on `StorageManager.prototype` it is
+		// `{ writable: true, configurable: true }` in every engine here, and the
+		// assignment does take effect at document start — measured. What breaks it
+		// is that WebKit re-binds the `StorageManager` instance it hands back: the
+		// own `persist` property the patch installed is gone by the end of the load
+		// (measured `ownPersistPersisted: false` on failing runs, `true` on passing
+		// ones), and the app's `navigator.storage.persist()` then hits the native
+		// function, which the patch never sees.
+		//
+		// The prototype is shared and not re-bound, so patching it survives for the
+		// life of the document. Measured under 6 parallel workers: instance patching
+		// recorded the call in 4/5 runs, prototype patching in 5/5, and only the
+		// prototype patch was still installed when the app called it.
 		await page.addInitScript(() => {
 			const log: string[] = [];
 			(window as unknown as { __persistCalls: string[] }).__persistCalls = log;
 			const storage = navigator.storage;
-			if (!storage || typeof storage.persist !== 'function') return;
-			const original = storage.persist.bind(storage);
-			storage.persist = async () => {
+			if (!storage) return;
+			// The prototype that actually owns `persist`; `navigator.storage` itself
+			// has no own property for it in any engine here. `getPrototypeOf` is typed
+			// as `any`, so it is narrowed to the one member this needs.
+			const owner = Object.getPrototypeOf(storage) as {
+				persist: (this: StorageManager) => Promise<boolean>;
+			};
+			const original = owner.persist;
+			if (typeof original !== 'function') return;
+			owner.persist = async function patchedPersist(this: StorageManager) {
 				log.push('persist');
-				return original();
+				return original.call(this);
 			};
 		});
 		await page.goto('/');
 		await hydration(page);
 
 		await expect
-			.poll(() =>
-				page.evaluate(
-					() => (window as unknown as { __persistCalls: string[] }).__persistCalls.length
-				)
+			.poll(
+				() =>
+					page.evaluate(
+						() => (window as unknown as { __persistCalls: string[] }).__persistCalls.length
+					),
+				{
+					// The call happens during the layout's mount effect, well inside a
+					// second when unloaded (measured 117–430 ms). The bound is generous
+					// because a loaded runner delays the effect, not because the signal
+					// is ambiguous: a page that never asks still fails, which the
+					// negative control in `docs/qa-v1.md` demonstrates.
+					timeout: 15_000,
+					message: 'the app never called navigator.storage.persist()'
+				}
 			)
 			.toBeGreaterThan(0);
 	});

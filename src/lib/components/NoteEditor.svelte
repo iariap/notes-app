@@ -232,7 +232,24 @@
 		void autosave.flush();
 	}
 
+	/**
+	 * `Esc` / `Ctrl+Enter` at `md+` (#7): hand focus to the row of the note that
+	 * was open.
+	 *
+	 * The editor has to let go of focus first. At `md+` this component stays
+	 * mounted, so the textarea is still the active element when the hand-off
+	 * runs, and `focusAfterRemoval` refuses to move focus while something other
+	 * than `<body>` holds it — the guard that keeps a delete from stealing focus
+	 * from the Undo toast (#21). Blurring is this editor stating that it is done
+	 * with the keyboard: the guard is then satisfied for the reason it exists,
+	 * and where focus lands is still decided by the same function that answers
+	 * it after a delete. Below `md` the editor navigates away instead and this
+	 * never runs.
+	 */
 	function focusListRow(): void {
+		// Read once: `textarea` is state, so comparing it twice would not narrow.
+		const element = textarea;
+		if (element !== null && document.activeElement === element) element.blur();
 		focusAfterRemoval(currentId);
 	}
 

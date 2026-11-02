@@ -601,6 +601,86 @@ describe('keyboard', () => {
 
 		expect((await currentRepository().getNote(id))?.body).toBe('typed then command-enter');
 	});
+
+	/**
+	 * The `md+` half of the same contract: the shortcut hands focus to the row of
+	 * the note that was open, and the save it flushed is already stored when it
+	 * does.
+	 *
+	 * Below `md` the editor navigates and the list is remounted, so focus is the
+	 * browser's business; from `md` up the editor **stays mounted**, and the
+	 * textarea it was typing in is still the active element. That is the state
+	 * this test builds: a real textarea holding focus, a row for the note in the
+	 * document beside it, and the `md` media query answering "wide".
+	 *
+	 * The row is asserted (not "some element") because "the list item" in the
+	 * issue means the one for this note, and the ordering is asserted too: the
+	 * stored body must already be the typed one at the moment focus arrives.
+	 */
+	for (const [label, event] of [
+		['Esc', { key: 'Escape' }],
+		['Ctrl+Enter', { key: 'Enter', ctrlKey: true }]
+	] as const) {
+		it(`${label} at md+ moves focus to the note's row, after the save landed`, async () => {
+			const id = await seed('start');
+			// Only the breakpoint query answers "wide": everything else keeps the
+			// setup's answer, which other components on the page may depend on.
+			const narrowMatchMedia = window.matchMedia;
+			vi.stubGlobal('matchMedia', (query: string): MediaQueryList => {
+				const list = narrowMatchMedia(query);
+				return query === '(min-width: 768px)' ? { ...list, matches: true } : list;
+			});
+			const list = document.createElement('div');
+			const realUpdate = currentStore().updateNote.bind(currentStore());
+			let saveLanded = false;
+			let landedAtFocus: boolean | null = null;
+			const spy = vi.spyOn(currentStore(), 'updateNote').mockImplementation((async (
+				noteId: string,
+				next: string
+			) => {
+				const result = await realUpdate(noteId, next);
+				saveLanded = true;
+				return result;
+			}) as unknown as NotesStore['updateNote']);
+			try {
+				renderEditor({ noteId: id });
+				await until(() => screen.queryByRole('textbox', { name: 'Note' }) !== null, 'textarea');
+
+				// The list beside the editor, reduced to what the hand-off queries.
+				list.innerHTML = `<a href="/notes/${id}" data-slot="note-row" data-note-id="${id}">start</a>`;
+				document.body.append(list);
+				const row = list.querySelector<HTMLElement>(`[data-note-id="${id}"]`)!;
+				// Records what storage held *at the instant* the row got focus, which
+				// is the only moment the "flush first" clause is about: asserting
+				// both facts after the fact would pass with the order reversed.
+				row.addEventListener(
+					'focus',
+					() => {
+						landedAtFocus ??= saveLanded;
+					},
+					{ once: true }
+				);
+
+				const element = textarea();
+				element.focus();
+				expect(document.activeElement).toBe(element);
+				await type('typed then left by keyboard');
+
+				await fireEvent.keyDown(element, event);
+				await settle();
+
+				// And focus is on the row of this note, not still in the textarea.
+				expect(document.activeElement).toBe(row);
+				// The save had already landed when the hand-off happened.
+				expect(landedAtFocus, 'focus moved before the flush completed').toBe(true);
+				expect((await currentRepository().getNote(id))?.body).toBe('typed then left by keyboard');
+			} finally {
+				spy.mockRestore();
+				list.remove();
+				vi.stubGlobal('matchMedia', narrowMatchMedia);
+			}
+		});
+	}
 });
 
 describe('marked slots for later issues', () => {

@@ -294,11 +294,17 @@ decision. Includes measured candidate values.
    the theme are unreachable in a real session, which is why #22 scopes itself to
    the light token.)
 
-2. **`Esc` / `Ctrl+Enter` at `md+` does not return focus to the list.** Verified:
-   the note _is_ saved, but focus stays in the editor. Below `md` both keys
-   navigate. Carried over from `#8`/`#21`. Every #11 test that needs to leave a
-   note at `md+` uses the header title link, which works at all widths — the
-   limitation is recorded, not routed around in production code.
+2. ~~**`Esc` / `Ctrl+Enter` at `md+` does not return focus to the list.**~~
+   **Fixed in `fix/7-esc-focus`.** It was verified here: the note _was_ saved, but
+   focus stayed in the editor. The cause was the editor staying mounted at `md+`
+   with its textarea still focused, and `focusAfterRemoval` (#21) correctly
+   refusing to take focus from anything other than `<body>`. The editor now
+   releases focus before handing it over; the guard is unchanged. Regression
+   tests: `note-editor.spec.ts` "at md+ Esc / Ctrl+Enter moves focus to the row
+   of the open note", plus the two unit cases. Note this changed _focus_, not
+   navigation: below `md` both keys still navigate, and from `md` up the editor
+   still stays open beside the list — so the #11 tests that leave a note at `md+`
+   keep using the header title link, because they need a route change.
 
 3. **Two Playwright suites in one worktree share one build dir.** `E2E_PORT`
    isolates the server but not `build/`. Carried over from `#8`. Mitigation used
@@ -355,12 +361,19 @@ the _same_ methodology, because #11 asks it to measure performance and a recorde
 number nobody can fail is a number nobody maintains — but it does so through one
 shared helper (`tests/e2e/helpers/list-perf.ts`), so the two can never drift.
 
-| metric                              | basis                                                                                 | samples             | target         | status                                |
-| ----------------------------------- | ------------------------------------------------------------------------------------- | ------------------- | -------------- | ------------------------------------- |
-| **1,000 notes — list first render** | marginal delta, **median-to-median**, both cold loads from document start             | **5 per condition** | delta < 500 ms | **GATED** (both specs, same helper)   |
-| **typing in a 10,000-char note**    | p95 per-keystroke cost on the page clock; control = identical typing in an empty note | 40 keystrokes each  | p95 < 40 ms    | **GATED**                             |
-| **repeat-visit first paint**        | absolute FCP after the service worker is warm                                         | 3                   | < 1,000 ms     | **RECORDED only**                     |
-| scrolling 1,000 notes               | longest scroll frame delta vs an empty list                                           | 3 each              | delta < 250 ms | **GATED** (`notes-list-perf.spec.ts`) |
+| metric                              | basis                                                                                 | samples                | target           | status                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- | ---------------- | --------------------------------------- |
+| **1,000 notes — list first render** | **ratio** `seededMedian / emptyMedian`, both cold loads from document start           | **9 empty + 5 seeded** | **ratio < 7.5x** | **GATED** (both specs, same helper)     |
+| **typing in a 10,000-char note**    | p95 per-keystroke cost on the page clock; control = identical typing in an empty note | 40 keystrokes each     | p95 < 40 ms      | **GATED**                               |
+| **repeat-visit first paint**        | absolute FCP after the service worker is warm                                         | 3                      | < 1,000 ms       | **RECORDED only**                       |
+| scrolling 1,000 notes               | longest scroll frame delta vs an empty list                                           | 3 each                 | delta < 250 ms   | **GATED** (`notes-list-perf.spec.ts`)   |
+| 1,000-note absolute marginal        | `seededMedian − emptyMedian`                                                          | 9 empty + 5 seeded     | —                | **RECORDED only** (runner-drift signal) |
+
+The render gate is a **ratio**, not a difference. `seeded − empty < 500 ms` was the
+gate until the difference was measured to be a hidden floor on runner speed — see
+"why the gate is a ratio" below. The absolute marginal is still printed on every
+run and worth reading: it is how a human notices the _runner_ drifting. Nothing
+asserts it.
 
 ### Measured numbers
 
@@ -383,12 +396,12 @@ On the **real CI runner** (much slower) the same property measured a marginal of
 
 ### Which are gated and why
 
-- **Gated — first render.** The gate is the _delta_ against an empty list measured
-  on the same machine in the same run: an absolute number measures the runner.
-  Both sides are the **median of 5 cold loads**, so one GC pause or one noisy
-  neighbour cannot fail the gate while a genuine regression still moves the
-  median. Absolute readings are printed and attached too, so a report can quote
-  both.
+- **Gated — first render.** The gate is the **ratio** `seeded / empty`, both sides
+  the median of cold loads measured on the same machine in the same run (9 empty,
+  5 seeded). The empty side gets more samples because it is the cheap one and sits
+  in the _denominator_, where its noise moves the gated number most.
+- **Recorded — the absolute marginal.** `seeded − empty` is printed and attached on
+  every run. It is how a human sees the runner drifting; it gates nothing.
 - **Gated — typing.** The control types the same number of characters into an
   empty note, so the constant cost of Playwright's own input dispatch cancels.
 - **Recorded — first paint.** Deliberately _not_ gated: the epic's "< 1 s" is
@@ -441,16 +454,80 @@ On the **real CI runner** (much slower) the same property measured a marginal of
    the budget to 1 ms makes both specs fail (`Received: 89` / `93` against
    `Expected: < 1`).
 
+### Why the render gate is a ratio and not a difference
+
+A 500 ms gate on `seeded − empty` looks machine-independent and is not. It permits
+only `1 + 500/empty` as a ratio, so the permitted multiple moves with the runner
+while the app's real multiple stays put. Measured across four machine speeds (40
+samples):
+
+| empty baseline       | ratio the 500 ms gate permits | app's actual ratio | verdict        |
+| -------------------- | ----------------------------- | ------------------ | -------------- |
+| 25 ms (local)        | 21.0                          | 4.56               | pass, 5x slack |
+| 95 ms                | 6.26                          | 4.87               | pass           |
+| 124 ms (CI)          | 5.03                          | 5.43               | **failed**     |
+| 136 ms (CI)          | 4.68                          | 4.87               | **failed**     |
+| 169 ms (6x throttle) | 3.96                          | 3.97               | **failed**     |
+
+Across all 40 measurements the ratio spans **3.20–6.86** (mean 4.88) with almost
+no real spread once n=5 noise is removed; the difference has ~27.5 % spread driven
+by machine speed. One run failed at 550 ms with ratio 5.43, another passed at
+441 ms with 5.64 — the verdict was the runner's, not the app's. The per-row render
+path was audited as well: ~5 ms of JS per 1,000 rows (title 0.72, preview 2.37,
+dates 1.08, validate 0.99) plus 9.6 ms of DOM growth since #6, so there was never
+a 400 ms regression to find.
+
+**`RENDER_RATIO_BUDGET = 7.5`** is 9 % above the highest ratio ever observed
+(6.86). It rejects a real regression of about 1.55x per-row cost, with roughly a
+2 % false-red rate at n=5.
+
+The ratio direction matters, and the two controls prove it:
+
+| scenario                                   | marginal   | old 500 ms gate | ratio | new 7.5x gate |
+| ------------------------------------------ | ---------- | --------------- | ----- | ------------- |
+| idle machine                               | 90 ms      | pass            | 5.00x | pass          |
+| 6x CPU throttle                            | **512 ms** | **FAIL**        | 4.40x | **pass**      |
+| 8x CPU throttle                            | **693 ms** | **FAIL**        | 4.57x | **pass**      |
+| idle machine + injected per-row regression | 183 ms     | **pass**        | 9.63x | **FAIL**      |
+
+The first two rows are the false red the old gate produced — a 693 ms marginal
+with the app untouched. The last row is the false green it also produced: a
+genuine 2x regression in per-row cost that stayed under 500 ms absolute, and which
+only the ratio caught.
+
+### Concurrency: the benchmarks no longer overlap
+
+Up to three 1,000-note benchmarks can be alive at once — `notes-list-perf.spec.ts`
+in `desktop` and `tablet`, plus `acceptance/performance.spec.ts` in `desktop` —
+and `fullyParallel: true` puts each test in its own worker. Since a seeded render
+costs ~3× the CPU of an empty one, overlapping benchmarks inflate the seeded side
+more than the empty side and the subtractive delta cannot cancel it.
+
+Both specs now wrap the benchmark in a **cross-process file lock**
+(`tests/e2e/helpers/perf-lock.ts`), so exactly one measures at a time. Verified by
+36 interleaved acquisitions across 6 projects and distinct OS processes with zero
+overlap; measured CI-time cost **zero** (full matrix 192 s before, 186 s / 188 s
+after).
+
 ### Residual risk, stated plainly
 
-Under _artificial_ CPU throttling combined with 10 parallel workers, the marginal
-measured **843 ms** and the property genuinely fails. A seeded render costs ~3×
-the CPU of an empty one, so contention does not cancel exactly in a subtractive
-delta — this is the runner, not the app, but it is a real limit of the method on
-a heavily overloaded machine. The mitigation available without weakening the gate
-is to not run two 1,000-note benchmarks concurrently (both specs qualify for it
-and run as separate parallel workers). Recorded as a known limitation in §7.
+The lock fixes overlap. It does not fix machine speed, and only one of those was a
+defect. Serialised on a single worker with **no contention at all**, the marginal
+still scales with how slow the CPU is:
 
+| throttle | empty median | seeded median | marginal   |
+| -------- | ------------ | ------------- | ---------- |
+| 1×       | 25 ms        | 114 ms        | **89 ms**  |
+| 2×       | 58 ms        | 222 ms        | **164 ms** |
+| 3×       | 77 ms        | 333 ms        | **256 ms** |
+| 4×       | 98 ms        | 451 ms        | **353 ms** |
+| 6×       | 169 ms       | 671 ms        | **502 ms** |
+
+Rendering 1,000 rows is CPU work, so a slower machine multiplies it while the part
+that cancels (shell, bundle, hydration) does not shrink with it. **The 500 ms
+budget is therefore also an implicit floor on runner speed**, satisfied by a runner
+whose empty load is up to roughly 150 ms. The CI runner's empty median is 136 ms
+against 25 ms locally (≈5.4×), i.e. the 6× row. See §7 item 11.
 ---
 
 ## 6. Existing assertions, budgets and the sanitizer — unchanged
@@ -576,21 +653,88 @@ question automation cannot settle.
     workflow added by a PR does not run for that PR's own label events. It needs
     one real label event _after_ this lands to be confirmed live.
 
-11. **The 1,000-note render gate is sensitive to _artificial_ load, and one
-    mitigation is not applied.** Two specs (the proven one and the acceptance one)
-    each run a 1,000-note benchmark, and `fullyParallel: true` lets them run as
-    concurrent workers. Under genuine CI contention the delta still held (389 ms
-    on the real runner; 96–130 ms locally under 10 parallel workers), but under
-    _artificial_ CPU throttling combined with that concurrency it measured 843 ms
-    and the property really did fail — a seeded render costs ~3× the CPU of an
-    empty one, so contention does not cancel exactly in a subtractive delta.
+11. **The 1,000-note render gate had three defects; all three are fixed.** Kept in
+    the record because each one masked the next, and each is something a reader
+    would otherwise be tempted to re-introduce.
 
-    The clean fix would be to serialise the two benchmarks (a shared resource lock
-    or `mode: 'serial'`) so they never overlap. **Not done here**, deliberately:
-    it changes how `notes-list-perf.spec.ts` is _scheduled_, and the scope of this
-    change was the acceptance spec's methodology. Worth doing if a `main` run ever
-    shows the delta drifting toward the budget. Raising the 500 ms budget is
-    **not** the fix, and was rejected.
+    **1. The probe was installed twice, and n=3 was too few.** `addInitScript`
+    accumulates, so the control-phase `'empty'` probe kept spinning during every
+    measured seeded load (24 extra DOM queries per load, ~4 % of seeded time), and
+    the median of 3 is decided by a single order statistic — replaying every
+    3-subset of the passing spec's own samples moved the verdict across a 126 ms
+    range on identical data. Fixed with one shared probe
+    (`tests/e2e/helpers/list-perf.ts`) and more samples.
+
+    **2. The benchmarks overlapped.** With `fullyParallel: true` up to three
+    1,000-note benchmarks ran at once (`notes-list-perf.spec.ts` in `desktop` and
+    `tablet`, plus `acceptance/performance.spec.ts` in `desktop`). A seeded render
+    costs ~3× the CPU of an empty one, so overlap inflates the seeded side more
+    than the empty side. Fixed with a **cross-process file lock**
+    (`tests/e2e/helpers/perf-lock.ts`): a directory created with a non-recursive
+    `mkdir` (atomic on POSIX and Windows), holding the owner's pid for diagnostics
+    and reclaimed when stale. Verified to exclude 36 acquisitions across 6 projects
+    and distinct OS processes with zero overlap, at **no measurable cost** (full
+    matrix 192 s before, 186 s and 188 s after).
+    `test.describe.configure({ mode: 'serial' })` was rejected because it orders
+    tests **within one file, one project, one worker** and cannot stop the
+    `desktop` copy of one file overlapping the `tablet` copy of another — exactly
+    the shape of the CI failures. It would also skip the scroll benchmark whenever
+    the render benchmark failed.
+
+    **3. The gate was a difference, so it was a floor on runner speed.**
+    `seeded − empty < 500 ms` permits only `1 + 500/empty` as a ratio, so the
+    allowed multiple moved with the machine (21.0 on a fast one, 3.96 under
+    throttling) while the app's real multiple stayed near 4.9. **This is now fixed
+    by gating the ratio** (`RENDER_RATIO_BUDGET = 7.5`, 9 empty + 5 seeded samples)
+    in both specs via the shared helper. The absolute marginal is still printed on
+    every run as a runner-drift signal; nothing asserts it. See §5 for the
+    measurement table and the two controls.
+
+    **What is deliberately not done:** the 7.5 budget was not tuned to this
+    machine. It is set 9 % above the highest ratio observed across all four
+    machine speeds (6.86), so it should hold on a runner slower than any measured
+    so far — the ratio is stable where the difference was not. If a `main` run
+    ever reports a ratio near 7.5, that is a real per-row regression and should be
+    investigated as one, not answered by raising the constant.
+
+12. **The `AC4` persistence test was patching the wrong object (fixed).** It
+    failed only in `desktop-webkit` and only under parallel load (5 of 6 runs at
+    6 workers). The descriptor was _not_ the problem — on `StorageManager.prototype`
+    `persist` is `{ writable: true, configurable: true }` in every engine here, and
+    assigning to the instance does take effect at document start. What breaks it is
+    that WebKit re-binds the `StorageManager` instance: the own `persist` property
+    the patch installed is gone by the time the app calls it, so
+    `navigator.storage.persist()` reaches the native function and the log stays
+    empty. Patching the **prototype** (shared, not re-bound) fixed it: 10/10, then
+    60/60 across three 6-worker runs. The assertion still fails if the app stops
+    asking — verified by removing the `requestPersistentStorage()` call site.
+
+13. **Focus is not restored after Undo — a real defect, tracked as #26.** A
+    keyboard user who undoes a delete ends on `<body>`: focus sits on the Undo
+    button for ~6 ms, the toast is removed at ~220 ms, and nothing re-focuses.
+    Measured 16/16 over a 2 s window in `desktop` and `desktop-webkit`, with the
+    restored row on screen, and `focus()` on that row demonstrably works — so the
+    gap is that the undo path never asks for it. The delete path does
+    (`NoteList.deleteFromList` → `focusAfterRemoval`); `delete-undo.ts` has no
+    focus restoration at all.
+
+    The old assertion hid this: it polled `.not.toBe("BODY")` _immediately_ after
+    the press, so it passed whenever it sampled inside that 6 ms sliver and failed
+    under full-matrix load when the toast won. It measured scheduling. It is
+    replaced by a separate `test.fixme` that asserts the settled state with the
+    real requirement — it fails with a clear message when run as a normal test
+    (verified), so it flips green the day #26 is fixed, with no edit beyond
+    removing the `.fixme`. The journey itself keeps its other ten assertions.
+
+14. **`responsive-every-state.spec.ts` "the document never scrolls vertically"
+    can time out on a saturated runner.** Seen once in `desktop-firefox` in a full
+    matrix run where the machine was ~2× loaded (perf empty baseline 52–60 ms vs
+    25 ms idle); the failure was `keyboard.type` exceeding the 30 s per-test
+    timeout, not an assertion. Passes 3/3 isolated and in the following full run.
+    **Pre-existing and untouched by this branch** (last modified in the #23
+    merge). Worth giving that test an explicit `setTimeout` if it recurs — typing
+    60 lines is the expensive part — but it was out of scope here and is not the
+    same defect as #12 or #13.
 
 ---
 
