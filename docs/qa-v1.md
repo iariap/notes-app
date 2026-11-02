@@ -447,16 +447,39 @@ On the **real CI runner** (much slower) the same property measured a marginal of
    the budget to 1 ms makes both specs fail (`Received: 89` / `93` against
    `Expected: < 1`).
 
+### Concurrency: the benchmarks no longer overlap
+
+Up to three 1,000-note benchmarks can be alive at once — `notes-list-perf.spec.ts`
+in `desktop` and `tablet`, plus `acceptance/performance.spec.ts` in `desktop` —
+and `fullyParallel: true` puts each test in its own worker. Since a seeded render
+costs ~3× the CPU of an empty one, overlapping benchmarks inflate the seeded side
+more than the empty side and the subtractive delta cannot cancel it.
+
+Both specs now wrap the benchmark in a **cross-process file lock**
+(`tests/e2e/helpers/perf-lock.ts`), so exactly one measures at a time. Verified by
+36 interleaved acquisitions across 6 projects and distinct OS processes with zero
+overlap; measured CI-time cost **zero** (full matrix 192 s before, 186 s / 188 s
+after).
+
 ### Residual risk, stated plainly
 
-Under _artificial_ CPU throttling combined with 10 parallel workers, the marginal
-measured **843 ms** and the property genuinely fails. A seeded render costs ~3×
-the CPU of an empty one, so contention does not cancel exactly in a subtractive
-delta — this is the runner, not the app, but it is a real limit of the method on
-a heavily overloaded machine. The mitigation available without weakening the gate
-is to not run two 1,000-note benchmarks concurrently (both specs qualify for it
-and run as separate parallel workers). Recorded as a known limitation in §7.
+The lock fixes overlap. It does not fix machine speed, and only one of those was a
+defect. Serialised on a single worker with **no contention at all**, the marginal
+still scales with how slow the CPU is:
 
+| throttle | empty median | seeded median | marginal   |
+| -------- | ------------ | ------------- | ---------- |
+| 1×       | 25 ms        | 114 ms        | **89 ms**  |
+| 2×       | 58 ms        | 222 ms        | **164 ms** |
+| 3×       | 77 ms        | 333 ms        | **256 ms** |
+| 4×       | 98 ms        | 451 ms        | **353 ms** |
+| 6×       | 169 ms       | 671 ms        | **502 ms** |
+
+Rendering 1,000 rows is CPU work, so a slower machine multiplies it while the part
+that cancels (shell, bundle, hydration) does not shrink with it. **The 500 ms
+budget is therefore also an implicit floor on runner speed**, satisfied by a runner
+whose empty load is up to roughly 150 ms. The CI runner's empty median is 136 ms
+against 25 ms locally (≈5.4×), i.e. the 6× row. See §7 item 11.
 ---
 
 ## 6. Existing assertions, budgets and the sanitizer — unchanged
@@ -582,21 +605,93 @@ question automation cannot settle.
     workflow added by a PR does not run for that PR's own label events. It needs
     one real label event _after_ this lands to be confirmed live.
 
-11. **The 1,000-note render gate is sensitive to _artificial_ load, and one
-    mitigation is not applied.** Two specs (the proven one and the acceptance one)
-    each run a 1,000-note benchmark, and `fullyParallel: true` lets them run as
-    concurrent workers. Under genuine CI contention the delta still held (389 ms
-    on the real runner; 96–130 ms locally under 10 parallel workers), but under
-    _artificial_ CPU throttling combined with that concurrency it measured 843 ms
-    and the property really did fail — a seeded render costs ~3× the CPU of an
-    empty one, so contention does not cancel exactly in a subtractive delta.
+11. **The 1,000-note render gate: the overlap half is fixed; the machine-speed
+    half is inherent.** Recorded here with the measurements, because the two were
+    initially conflated and only one of them is a defect.
 
-    The clean fix would be to serialise the two benchmarks (a shared resource lock
-    or `mode: 'serial'`) so they never overlap. **Not done here**, deliberately:
-    it changes how `notes-list-perf.spec.ts` is _scheduled_, and the scope of this
-    change was the acceptance spec's methodology. Worth doing if a `main` run ever
-    shows the delta drifting toward the budget. Raising the 500 ms budget is
-    **not** the fix, and was rejected.
+    **Overlap — fixed.** With `fullyParallel: true` up to three 1,000-note
+    benchmarks ran concurrently: `notes-list-perf.spec.ts` in `desktop` and
+    `tablet`, plus `acceptance/performance.spec.ts` in `desktop`. A seeded render
+    costs ~3× the CPU of an empty one, so overlapping benchmarks inflate the
+    seeded side more than the empty side, and a subtractive delta cannot cancel
+    that. Both files now take a **cross-process file lock** around the benchmark
+    (`tests/e2e/helpers/perf-lock.ts`), so only one measures at a time.
+
+    `test.describe.configure({ mode: 'serial' })` was rejected because it orders
+    tests **within one file, one project, one worker** — it cannot stop the
+    `desktop` copy of one file overlapping the `tablet` copy of another, which is
+    exactly the shape of the CI failures (desktop red while tablet passed in the
+    same run). It would also skip the scrolling benchmark whenever the render
+    benchmark failed, hiding an independent property. The lock is a directory
+    created with a non-recursive `mkdir` (atomic on POSIX and Windows), holding
+    the owner's pid for diagnostics and reclaimed if stale; it was verified to
+    exclude 36 acquisitions across 6 projects and distinct OS processes with zero
+    overlap. Measured cost: **none** — full matrix 192 s before, 186 s and 188 s
+    after.
+
+    **Machine speed — inherent, not fixed here.** Serialised on one worker with no
+    contention at all, the marginal still scales with CPU throttle rate:
+
+    | throttle | empty median | seeded median | marginal   |
+    | -------- | ------------ | ------------- | ---------- |
+    | 1×       | 25 ms        | 114 ms        | **89 ms**  |
+    | 2×       | 58 ms        | 222 ms        | **164 ms** |
+    | 3×       | 77 ms        | 333 ms        | **256 ms** |
+    | 4×       | 98 ms        | 451 ms        | **353 ms** |
+    | 6×       | 169 ms       | 671 ms        | **502 ms** |
+
+    Rendering 1,000 rows is CPU work, so a slower machine multiplies it while the
+    shared shell cost — the part that is supposed to cancel — does not shrink with
+    it. **The 500 ms budget is therefore also an implicit floor on runner speed.**
+    The CI runner's empty median was 136 ms against 25 ms locally (≈5.4×), which
+    is the 6× row, i.e. right at the budget. The lock removes the measurement
+    defect; it cannot make a slow CPU fast.
+
+    If a `main` run still shows the marginal drifting to 500 ms _with the lock in
+    place_, the honest response is to re-derive the budget and the sample count
+    together against measured runner speed — not to raise the number alone, and
+    not to lower the sample count. That decision is deliberately left to a human
+    with the `main` numbers in hand; nothing was relaxed here (budgets, sample
+    counts and every assertion are byte-identical to the previous state).
+
+12. **The `AC4` persistence test was patching the wrong object (fixed).** It
+    failed only in `desktop-webkit` and only under parallel load (5 of 6 runs at
+    6 workers). The descriptor was _not_ the problem — on `StorageManager.prototype`
+    `persist` is `{ writable: true, configurable: true }` in every engine here, and
+    assigning to the instance does take effect at document start. What breaks it is
+    that WebKit re-binds the `StorageManager` instance: the own `persist` property
+    the patch installed is gone by the time the app calls it, so
+    `navigator.storage.persist()` reaches the native function and the log stays
+    empty. Patching the **prototype** (shared, not re-bound) fixed it: 10/10, then
+    60/60 across three 6-worker runs. The assertion still fails if the app stops
+    asking — verified by removing the `requestPersistentStorage()` call site.
+
+13. **Focus is not restored after Undo — a real defect, tracked as #26.** A
+    keyboard user who undoes a delete ends on `<body>`: focus sits on the Undo
+    button for ~6 ms, the toast is removed at ~220 ms, and nothing re-focuses.
+    Measured 16/16 over a 2 s window in `desktop` and `desktop-webkit`, with the
+    restored row on screen, and `focus()` on that row demonstrably works — so the
+    gap is that the undo path never asks for it. The delete path does
+    (`NoteList.deleteFromList` → `focusAfterRemoval`); `delete-undo.ts` has no
+    focus restoration at all.
+
+    The old assertion hid this: it polled `.not.toBe("BODY")` _immediately_ after
+    the press, so it passed whenever it sampled inside that 6 ms sliver and failed
+    under full-matrix load when the toast won. It measured scheduling. It is
+    replaced by a separate `test.fixme` that asserts the settled state with the
+    real requirement — it fails with a clear message when run as a normal test
+    (verified), so it flips green the day #26 is fixed, with no edit beyond
+    removing the `.fixme`. The journey itself keeps its other ten assertions.
+
+14. **`responsive-every-state.spec.ts` "the document never scrolls vertically"
+    can time out on a saturated runner.** Seen once in `desktop-firefox` in a full
+    matrix run where the machine was ~2× loaded (perf empty baseline 52–60 ms vs
+    25 ms idle); the failure was `keyboard.type` exceeding the 30 s per-test
+    timeout, not an assertion. Passes 3/3 isolated and in the following full run.
+    **Pre-existing and untouched by this branch** (last modified in the #23
+    merge). Worth giving that test an explicit `setTimeout` if it recurs — typing
+    60 lines is the expensive part — but it was out of scope here and is not the
+    same defect as #12 or #13.
 
 ---
 

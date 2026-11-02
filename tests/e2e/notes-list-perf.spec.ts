@@ -5,6 +5,7 @@ import {
 	installListReadyProbe,
 	median
 } from './helpers/list-perf';
+import { withPerfBenchmarkLock } from './helpers/perf-lock';
 import { seedNote, seedNotes } from './helpers/seed';
 
 /**
@@ -122,21 +123,28 @@ test.describe('1,000 notes', () => {
 
 	test('1,000 notes add less than 500 ms to the first render', async ({ page }, testInfo) => {
 		test.setTimeout(PERF_TEST_TIMEOUT_MS);
-		await installListReadyProbe(page);
 
-		// Control: the identical cold load with an empty list.
-		await seedNotes(page, []);
+		// One of up to three concurrent copies of this benchmark (this file in
+		// `desktop` and `tablet`, plus `acceptance/performance.spec.ts` in `desktop`).
+		// They are mutually excluded by a cross-process lock: see
+		// `tests/e2e/helpers/perf-lock.ts` for why `describe.configure` cannot do it.
 		const emptySamples: number[] = [];
-		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
-			emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
-		}
-
-		// Subject: the same load with 1,000 notes in storage.
-		await seedNotes(page, thousandNotes(Date.now()));
 		const seededSamples: number[] = [];
-		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
-			seededSamples.push(await coldLoadToReady(page, { kind: 'rows', count: NOTE_COUNT }));
-		}
+		await withPerfBenchmarkLock(`notes-list-perf@${testInfo.project.name}`, async () => {
+			await installListReadyProbe(page);
+
+			// Control: the identical cold load with an empty list.
+			await seedNotes(page, []);
+			for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+				emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
+			}
+
+			// Subject: the same load with 1,000 notes in storage.
+			await seedNotes(page, thousandNotes(Date.now()));
+			for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+				seededSamples.push(await coldLoadToReady(page, { kind: 'rows', count: NOTE_COUNT }));
+			}
+		});
 
 		const empty = median(emptySamples);
 		const seeded = median(seededSamples);

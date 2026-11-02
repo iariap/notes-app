@@ -6,6 +6,7 @@ import {
 	median
 } from '../helpers/list-perf';
 import { seedNote, seedNotes, type SeedNote } from '../helpers/seed';
+import { withPerfBenchmarkLock } from '../helpers/perf-lock';
 import { placeCaretAtEnd } from './support';
 
 /**
@@ -55,12 +56,30 @@ import { placeCaretAtEnd } from './support';
  * delta 84–120 ms locally, 389 ms on the slow CI runner), and a genuine
  * regression still moves the median well past it.
  *
- * The remaining risk is not sampling. Under artificial CPU throttling *and* 10
- * parallel workers the delta measured 843 ms — because a seeded render is ~3×
- * more CPU than an empty one, so contention does not fully cancel in a
- * subtractive delta. That is the runner, and the mitigation is to not run two
- * 1,000-note benchmarks concurrently (this spec and `notes-list-perf.spec.ts`
- * both qualify for it); see `docs/qa-v1.md`.
+ * The remaining risk is not sampling, and not only overlap. Two separate effects:
+ *
+ * 1. **Overlap (fixed here).** A seeded render costs ~3× the CPU of an empty
+ *    one, so when two 1,000-note benchmarks run at once the seeded side is
+ *    inflated more than the empty side and a subtractive delta cannot cancel it.
+ *    With `fullyParallel: true` up to three run concurrently (this file in
+ *    `desktop`, plus `notes-list-perf.spec.ts` in `desktop` and `tablet`).
+ *    Both files now take a **cross-process lock** around the benchmark
+ *    (`tests/e2e/helpers/perf-lock.ts`), so only one measures at a time. This is
+ *    a file lock, not `describe.configure`: serial mode orders tests inside one
+ *    file and cannot stop the `desktop` copy of one file overlapping the `tablet`
+ *    copy of another, which is precisely what turned the full matrix red.
+ * 2. **Machine speed (inherent, not fixed here).** Serialised on one worker with
+ *    no contention at all, the marginal still scales with CPU throttle rate:
+ *    89 → 164 → 256 → 353 → **502 ms** at 1×/2×/3×/4×/6×. The extra work of
+ *    rendering 1,000 rows is CPU work, so a slower machine multiplies it while
+ *    the shared shell cost (the part that "cancels") does not shrink with it.
+ *    The 500 ms budget is therefore also, implicitly, a floor on runner speed:
+ *    it is satisfied by a machine whose empty load is up to roughly 150 ms,
+ *    which at the time of writing covers the CI runner (empty median 136 ms).
+ *    A measurably slower runner would need the budget and the sample count
+ *    revisited together — deliberately not done here, because the numbers that
+ *    triggered this were ~500–584 ms against a 136 ms baseline and the lock
+ *    addresses the part that was actually a measurement defect.
  *
  * ## Gating the same property twice, on purpose
  *
@@ -194,24 +213,30 @@ test.describe('performance', () => {
 	test('1,000 notes cost less than 500 ms of extra first render', async ({ page }, testInfo) => {
 		test.setTimeout(240_000);
 
-		// One probe for the whole test, installed once: `addInitScript` accumulates,
-		// and the second install this test used to do left a dead `'empty'` probe
-		// spinning on every seeded load. See `tests/e2e/helpers/list-perf.ts`.
-		await installListReadyProbe(page);
-
-		// Control: the identical cold load with an empty list, 5 samples.
-		await seedNotes(page, []);
+		// The only 1,000-note benchmark this file runs, so a whole-benchmark lock is
+		// the right granularity. It excludes the `notes-list-perf.spec.ts` copies in
+		// the other projects, which would otherwise overlap this one and inflate the
+		// seeded side of the delta without inflating the empty side.
 		const emptySamples: number[] = [];
-		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
-			emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
-		}
-
-		// Subject: the same load with 1,000 notes in storage, 5 samples.
-		await seedNotes(page, thousandNotes(Date.now()));
 		const seededSamples: number[] = [];
-		for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
-			seededSamples.push(await coldLoadToReady(page, { kind: 'rows', count: NOTE_COUNT }));
-		}
+		await withPerfBenchmarkLock(`acceptance/performance@${testInfo.project.name}`, async () => {
+			// One probe for the whole test, installed once: `addInitScript` accumulates,
+			// and the second install this test used to do left a dead `'empty'` probe
+			// spinning on every seeded load. See `tests/e2e/helpers/list-perf.ts`.
+			await installListReadyProbe(page);
+
+			// Control: the identical cold load with an empty list, 5 samples.
+			await seedNotes(page, []);
+			for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+				emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
+			}
+
+			// Subject: the same load with 1,000 notes in storage, 5 samples.
+			await seedNotes(page, thousandNotes(Date.now()));
+			for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+				seededSamples.push(await coldLoadToReady(page, { kind: 'rows', count: NOTE_COUNT }));
+			}
+		});
 
 		const empty = median(emptySamples);
 		const seeded = median(seededSamples);

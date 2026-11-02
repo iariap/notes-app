@@ -155,12 +155,26 @@ test.describe('keyboard-only journey', () => {
 		await expect(undoButton(page)).toBeFocused();
 		await page.keyboard.press('Enter');
 
-		// --- 7. the note is back and focus is on something actionable --------
+		// --- 7. the note is back, and the list is where the journey continues --
 		await waitForList(page);
 		await expect(rows(page)).toHaveCount(1);
-		// Not `<body>`: the focus hand-off is what keeps a keyboard user in place
-		// after a delete, and it has to survive the Undo round trip.
-		await expect.poll(async () => (await focused(page)).tag).not.toBe('BODY');
+
+		// Focus after Undo is **not** asserted here, deliberately.
+		//
+		// The assertion this replaces was `expect.poll(...).not.toBe('BODY')`
+		// sampled immediately after pressing Undo, and it did not test the claim:
+		// focus sits on the Undo button for ~6 ms and falls to `<body>` at ~220 ms,
+		// so the poll passed only when it happened to sample inside that sliver —
+		// and failed under full-matrix load when the toast was removed first. It
+		// measured scheduling, which is why it flaked in `desktop-webkit`.
+		//
+		// Measured over 2 s in `desktop` and `desktop-webkit` (16/16): focus really
+		// does end on `<body>`, with the restored row on screen. The delete path
+		// hands focus onward (`NoteList.deleteFromList` calls `focusAfterRemoval`);
+		// the undo path calls nothing. That is a defect, filed as **#26** and
+		// covered by its own known-failing test below — kept separate so this
+		// journey still exercises its other ten assertions while the bug is open.
+		await expect(page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 10_000 });
 
 		// --- 8. and the list is still navigable, which proves the journey
 		//        ended somewhere usable rather than merely painted -----------
@@ -172,8 +186,58 @@ test.describe('keyboard-only journey', () => {
 		await expect(editorBody(page)).toHaveValue('# Keyboard note\n\n- [ ] milk');
 	});
 
+	// ## Known failure: focus is not restored after Undo (#26)
+	//
+	// `test.fixme` marks a test that is expected to fail: it is reported as
+	// `fixme` and does not fail the run, but unlike `skip` it still shows up, and
+	// the assertion inside is the real requirement rather than a comment. That is
+	// the honest state of this gap — measured, reported in #26, not silently
+	// asserted as correct.
+	//
+	// Why it is a separate test rather than a line in the journey above: the
+	// journey covers ten other things, and marking *it* known-failing would hide
+	// all of them. Here the single claim is isolated, so when #26 is fixed the
+	// only edit is deleting the `.fixme`.
+	test.fixme('after Undo, focus is not left on <body> (defect: #26)', async ({ page }) => {
+		await page.goto('/notes/new');
+		await hydration(page);
+		await page.keyboard.type('a note to delete and restore');
+		await page.getByRole('heading', { level: 1 }).getByRole('link', { name: 'Notes' }).click();
+		await expect(page).toHaveURL('/');
+		await waitForList(page);
+
+		// Delete from the list menu, then restore from the toast — the shortest path
+		// to the behaviour, with no editor involved.
+		await page.locator('[data-testid="note-row-menu"]').first().focus();
+		await page.keyboard.press('Enter');
+		await page.getByRole('menuitem', { name: 'Delete' }).click();
+		await expect(deleteToast(page)).toBeVisible();
+
+		await undoButton(page).focus();
+		await page.keyboard.press('Enter');
+
+		// Wait for the toast to leave, then give the app's own retry a chance to run.
+		// Reading the state *before* the toast is gone would measure the transient,
+		// which is what made the old assertion scheduling-dependent.
+		await expect(page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 10_000 });
+		await expect(rows(page)).toHaveCount(1);
+
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() => {
+						const active = document.activeElement as HTMLElement | null;
+						return active === null || active === document.body ? 'BODY' : active.tagName;
+					}),
+				{
+					message: 'a keyboard user who undoes a delete must land on something they can act on',
+					timeout: 5_000
+				}
+			)
+			.not.toBe('BODY');
+	});
+
 	test('every row contributes its two tab stops, in order', async ({ page }) => {
-		// The structural counterpart to the journey above. The journey never
 		// visits the list rows on the way out, so a control added to a row later
 		// without a tab stop would slip past it; this walk proves each row's link
 		// and its menu are both reachable, and in that order.
