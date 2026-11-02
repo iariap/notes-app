@@ -32,8 +32,34 @@
  * there and only there, the disappearance is the user's own click. The ids this
  * tab deleted are recorded *before* the write, so the editor can tell the two
  * apart without waiting for anything.
+ *
+ * ## Undo returns focus to the restored row (#26)
+ *
+ * Dismissing the toast removes the Undo button, and the browser drops focus to
+ * `<body>` when the element that holds it goes away. On the delete path the list
+ * answers that with `focusAfterRemoval`; the undo path had nothing, so a keyboard
+ * user who pressed Undo lost their place in the document.
+ *
+ * The hand-off therefore runs here, dismissing the toast first and moving focus
+ * after, and lands where the delete path leaves it: the row of the note that came
+ * back. Two things had to be measured rather than assumed:
+ *
+ * - **The order is not what makes it stick.** Handing off before the dismissal is
+ *   equally final, because `focusAfterRemoval` retries on animation frames and
+ *   sonner removes the toast ~200 ms later, inside that budget. Dismissing first
+ *   is still what the sequence reads as (the removal is the event being answered),
+ *   but the claim rests on the release below, not on the ordering.
+ * - **The release is.** Focus is *inside the toast* when Undo is pressed — the
+ *   realistic undo is Enter on the button — and `focusAfterRemoval`'s guard
+ *   (correctly) refuses to move focus away from anything live. Without releasing
+ *   that control first, focus stays on the dying toast and falls to `<body>` with
+ *   it: measured, every focused test fails. Releasing it is the same statement
+ *   `NoteEditor.focusListRow` makes about its textarea, and the guard is then
+ *   satisfied for the reason it exists instead of refusing on behalf of a node
+ *   that is on its way out. `notes-focus.ts` itself is unchanged.
  */
 import { toast, type ExternalToast } from 'svelte-sonner';
+import { focusAfterRemoval } from '$lib/components/notes-focus';
 import type { Note } from './types';
 
 export const DELETE_TOAST_MESSAGE = 'Note deleted';
@@ -46,6 +72,9 @@ export const UNDO_WINDOW_MS = 5000;
 
 /** Sonner's container; focus inside it holds every open window. */
 const TOASTER_SELECTOR = '[data-sonner-toaster]';
+
+/** One toast within that container; the node a dismissal removes. */
+const TOAST_TOAST_SELECTOR = '[data-sonner-toast]';
 
 type ToastId = string | number;
 
@@ -197,19 +226,76 @@ export function finalizeAllUndoWindows(): void {
 	for (const session of [...sessions.values()]) expire(session);
 }
 
-async function undo(session: UndoSession): Promise<void> {
+/**
+ * The toast an action press belongs to: the one whose button sonner wired the
+ * handler to.
+ *
+ * Read from the event, at the moment the handler runs — which is *before* the
+ * dismissal, while the button is still in the document. This is deliberately not
+ * "the toast focus happens to be in": with two windows open, pressing one toast's
+ * Undo while the other holds focus must not touch the second one (#21), and only
+ * the pressed button says which toast is going away.
+ */
+function toastRootOf(event: Event): Element | null {
+	const target = event.currentTarget;
+	return target instanceof Element ? target.closest(TOAST_TOAST_SELECTOR) : null;
+}
+
+/**
+ * Whether focus is on the toast that is now being dismissed, and so is about to
+ * be removed from the document.
+ *
+ * The realistic Undo is a keypress on the toast's own button, so `undo()` runs
+ * with focus *inside the toast it is dismissing* — and that whole node is going
+ * away, so its focus is not a competing owner. Releasing it is the same statement
+ * `NoteEditor.focusListRow` makes about its textarea before the Esc hand-off.
+ *
+ * The scope is that one toast, never "anything in the toaster": with two deletes
+ * open, a mouse click on one toast while the other holds focus must leave the
+ * other alone — that is #21, and blurring it would be the steal the guard exists
+ * to prevent.
+ */
+function focusIsOnDyingToast(root: Element | null): boolean {
+	if (root === null || typeof document === 'undefined') return false;
+	const active = document.activeElement;
+	return active instanceof Element && (active === root || root.contains(active));
+}
+
+/**
+ * Hands focus to the row of the note that just came back (#26).
+ *
+ * `focusAfterRemoval`'s own guard still decides — it is unchanged, and it still
+ * refuses whenever anything live holds focus (a row the user is on, another
+ * toast). The one thing released first is the dismissing toast's own control,
+ * which is not live: see `focusIsOnDyingToast`. Without that release the guard
+ * refuses, focus stays on the toast, and the removal drops it to `<body>` — the
+ * defect itself, measured.
+ */
+function focusRestoredRow(id: string, dyingToast: Element | null): void {
+	if (focusIsOnDyingToast(dyingToast)) {
+		(document.activeElement as HTMLElement | null)?.blur();
+	}
+	focusAfterRemoval(id);
+}
+
+async function undo(session: UndoSession, dyingToast: Element | null): Promise<void> {
 	// Inert once the window closed: a click that arrives after expiry (or after
 	// this same Undo already ran) must not touch storage.
 	if (session.closed) return;
 	closeSession(session);
+	let restored: string | null = null;
 	try {
 		await session.target.restoreNote(session.note);
 		// The note exists again in this tab, so this id is no longer "deleted".
 		deletedHere.delete(session.note.id);
+		restored = session.note.id;
 	} catch (error) {
 		session.notify(UNDO_FAILED_MESSAGE, { description: messageOf(error) });
 	} finally {
 		session.notify.dismiss(session.id);
+		// Only a note that is really back has a row to land on: a failed restore
+		// leaves the list unchanged, and the user is told what happened instead.
+		if (restored !== null) focusRestoredRow(restored, dyingToast);
 	}
 }
 
@@ -238,8 +324,13 @@ function openSession(
 		duration: Number.POSITIVE_INFINITY,
 		action: {
 			label: UNDO_ACTION_LABEL,
-			onClick: () => {
-				void undo(session);
+			// Sonner calls this with the button it wired up, so the toast being
+			// dismissed is identified here, while the node is still in the DOM.
+			// Typed as `Event` (the broader parameter): what is read is the
+			// handler's own target, not anything sonner narrows for the handler.
+			onClick: (event: Event) => {
+				const dyingToast = toastRootOf(event);
+				void undo(session, dyingToast);
 			}
 		}, // Dismissed by the user (swipe, close button) or auto-closed: either way
 		// the window is over and the deletion is final.

@@ -257,6 +257,148 @@ test.describe('undo', () => {
 	});
 });
 
+test.describe('focus after Undo (#26)', () => {
+	/** Waits until the restored row is on screen, so focus has a target to land on. */
+	async function waitForRestored(page: Page, id: string, count: number): Promise<void> {
+		await expect(page.locator('[data-slot="note-row"]')).toHaveCount(count);
+		await expect(page.locator(`[data-slot="note-row"][data-note-id="${id}"]`)).toBeVisible();
+	}
+
+	/**
+	 * Tabs from the row to its "⋯" menu and deletes with the keyboard.
+	 *
+	 * The trigger mounts the menu already open with focus on the menu container
+	 * (see `NoteListRow`), so the item is one `ArrowDown` away, then `Enter` —
+	 * the presses a keyboard user actually makes.
+	 */
+	async function deleteFromRowMenu(page: Page, index: number): Promise<void> {
+		await rows(page).nth(index).focus();
+		await expect(rows(page).nth(index)).toBeFocused();
+		await pressTab(page);
+		await expect(page.locator('[data-testid="note-row-menu"]').nth(index)).toBeFocused();
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('ArrowDown');
+		await expect(page.getByRole('menuitem', { name: 'Delete' })).toBeFocused();
+		await page.keyboard.press('Enter');
+	}
+
+	/** Tabs forward until the Undo button itself holds focus. */
+	async function tabToUndo(page: Page): Promise<void> {
+		for (let stop = 0; stop < 12; stop += 1) {
+			const onUndo = await page.evaluate(
+				() =>
+					document.activeElement instanceof HTMLElement &&
+					document.activeElement.dataset.button !== undefined
+			);
+			if (onUndo) return;
+			await pressTab(page);
+		}
+		throw new Error('the Undo button was never reached by tabbing');
+	}
+
+	test('lands on the restored note’s own row, pressed from the keyboard', async ({ page }) => {
+		// The realistic path: the user tabs to Undo and presses Enter, so focus is
+		// *inside the toast* at the instant the hand-off runs — not on `<body>`, and
+		// not somewhere the guard would have to guess about. Both engines that
+		// reported the defect run this (the whole matrix, in fact).
+		const notes = await seedThree(page, Date.now());
+		const target = notes[1];
+
+		await deleteFromRowMenu(page, 1);
+		await expect(deleteToast(page)).toBeVisible();
+		await expect(page.locator('[data-slot="note-row"]')).toHaveCount(2);
+
+		await tabToUndo(page);
+		await expect(undoButton(page)).toBeFocused();
+		// The premise of the whole test: at this instant focus is in the toaster.
+		expect(
+			await page.evaluate(() => document.activeElement?.closest('[data-sonner-toaster]') !== null),
+			'the Undo button must be focused, inside the toaster, when Enter is pressed'
+		).toBe(true);
+
+		await page.keyboard.press('Enter');
+
+		// The settled state, which is what a user experiences: the toast is gone
+		// (that removal is what drops focus to `<body>`) and the note is back.
+		await expect(page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 10_000 });
+		await waitForRestored(page, target.id, 3);
+
+		await expect(
+			page.locator(`[data-slot="note-row"][data-note-id="${target.id}"]`),
+			'after Undo, focus must be on the row of the note that came back'
+		).toBeFocused();
+		// Not merely "not <body>": a lost user is the failure this test exists for.
+		expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+	});
+
+	test('lands on the row even when the restored note is the only one', async ({ page }) => {
+		const notes = await seedNotes(page, [seedNote(1, 'Only note', new Date().toISOString())]);
+		await waitForList(page);
+		const target = notes[0];
+
+		await deleteFromRowMenu(page, 0);
+		await expect(deleteToast(page)).toBeVisible();
+		await expect(page.locator('[data-testid="note-list-empty"]')).toBeVisible();
+
+		await tabToUndo(page);
+		await page.keyboard.press('Enter');
+
+		await expect(page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 10_000 });
+		await waitForRestored(page, target.id, 1);
+
+		await expect(page.locator(`[data-slot="note-row"][data-note-id="${target.id}"]`)).toBeFocused();
+	});
+
+	test('lands on the row of the restored note, out of several and after a mouse press', async ({
+		page
+	}) => {
+		// Same claim from the other activation path: a pointer press leaves focus on
+		// the Undo button too (a click focuses a `<button>`), so the hand-off has to
+		// hold there as well.
+		const notes = await seedThree(page, Date.now());
+		const target = notes[1];
+
+		await deleteFromRowMenu(page, 1);
+		await expect(deleteToast(page)).toBeVisible();
+
+		await undoButton(page).click();
+
+		await expect(page.locator('[data-sonner-toast]')).toHaveCount(0, { timeout: 10_000 });
+		await waitForRestored(page, target.id, 3);
+
+		await expect(page.locator(`[data-slot="note-row"][data-note-id="${target.id}"]`)).toBeFocused();
+	});
+
+	test('an Undo window that expires moves no focus', async ({ page }, testInfo) => {
+		// The clock is the subject, so this runs in one project (the same rule the
+		// other clock test follows). Expiry is the case where the hand-off must not
+		// run at all: no note came back, so there is no row to move to, and the
+		// focus the delete handed to the neighbouring row must stay there.
+		test.skip(testInfo.project.name !== 'desktop', 'clock manipulation, run once');
+
+		const notes = await seedThree(page, Date.now());
+		const surviving = notes[0];
+
+		await page.clock.install();
+		await rows(page).nth(1).hover();
+		await page.locator('[data-testid="note-row-menu"]').nth(1).click();
+		await page.getByRole('menuitem', { name: 'Delete' }).click();
+		await expect(deleteToast(page)).toBeVisible();
+		await expect(page.locator('[data-slot="note-row"]')).toHaveCount(2);
+
+		// The neighbour the delete handed focus to (newest first: deleting the
+		// middle leaves `First note` in its slot).
+		const neighbour = page.locator(`[data-slot="note-row"][data-note-id="${surviving.id}"]`);
+		await expect(neighbour).toBeFocused();
+
+		await page.clock.fastForward(MIN_LONG_WINDOW + 1000);
+		await expect(deleteToast(page)).toHaveCount(0);
+		await page.waitForTimeout(300);
+
+		await expect(neighbour, 'an expired Undo must not move focus').toBeFocused();
+	});
+});
+
 test.describe('delete from the list menu', () => {
 	test('deletes through "⋯ → Delete" and restores through Undo', async ({ page }) => {
 		const notes = await seedThree(page, Date.now());
