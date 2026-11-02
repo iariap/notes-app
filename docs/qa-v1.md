@@ -275,7 +275,7 @@ Everything lives under `tests/e2e/acceptance/`.
 | fully keyboard-operable                                         | `acceptance/keyboard-journey.spec.ts` — a full journey with **no `click()` and no `mouse.*`**: skip link → New note → type → preview → delete → undo → back into a note. Plus "every row contributes its two tab stops, in order".                                                  |
 | visible focus                                                   | `a11y-every-state.spec.ts` "visible focus: every focused control shows a focus ring" (computed outline **or** ring on each tab stop)                                                                                                                                                |
 | labelled controls                                               | `a11y-every-state.spec.ts` "every control has an accessible name" (resolves names the way a screen reader does, including `<label for>`)                                                                                                                                            |
-| WCAG AA contrast                                                | `delete.spec.ts` "the Undo button clears AA contrast on its own colors" (reused) + axe everywhere                                                                                                                                                                                   |
+| WCAG AA contrast                                                | `delete.spec.ts` "the Undo button clears AA contrast on its own colors" (reused) + `destructive-token.spec.ts` (the destructive token, full strength and at `/90`, plus the controls that use it) + axe everywhere                                                                  |
 | **zero serious/critical axe violations, every route and state** | `a11y-every-state.spec.ts` — **in every project**: list (empty + populated), editor (edit + preview), `/notes/new`, missing note, delete toast, row menu, save-error alert, storage notice, "deleted in another tab"                                                                |
 | responsive: phone, tablet, desktop first-class                  | `responsive-every-state.spec.ts` — **5 widths × every state**: empty list, populated list, editor, preview tabs, preview side-by-side, delete toast, storage notice, save-error alert, missing note, deleted-in-another-tab, plus the "document never scrolls vertically" invariant |
 | list stays smooth with 1,000 notes                              | **reused:** `notes-list-perf.spec.ts` (delta gates, unchanged) + §5                                                                                                                                                                                                                 |
@@ -299,21 +299,50 @@ identical build.
 - Fix: `src/lib/pwa/updates.ts` — `onNeedRefresh` is ignored when the page is not controlled by a worker. A genuine update always has a controller, so the prompt is never hidden: verified in Firefox by installing a byte-changed `sw.js` on a controlled page, which **still** raises the toast.
 - Regression test: `tests/e2e/pwa-first-install-prompt.spec.ts` (6 projects) + 3 unit tests in `tests/unit/pwa-updates.spec.ts`. Confirmed it **fails** with the fix reverted and passes with it in place.
 
-**2. Save-error alert text was 4.49:1 — under WCAG AA.**
+**2. Save-error alert text was under WCAG AA.**
 `Alert`'s generated `destructive` variant used `*:data-[slot=alert-description]:text-destructive/90`.
-`--destructive` is `oklch(0.577 0.245 27.325)`; at 90 % opacity over white that
-is **4.49:1**, just below the 4.50:1 AA floor for normal text. Measured in
-Chromium, Firefox **and** WebKit.
+`--destructive` was then `oklch(0.577 0.245 27.325)`; at 90 % opacity over white
+that measured **4.54:1** in Chromium and Firefox and **4.50:1** in WebKit
+(4.4963, i.e. just under) — below the 4.50:1 AA floor for normal text. The
+colour is slightly out of sRGB gamut (its green channel is negative), so each
+engine clips it differently; that is why they do not agree.
 
 - Fix: use full-strength `text-destructive` (**4.77:1**), keeping the emphasis without breaking AA. One line in `src/lib/components/ui/alert/alert.svelte`, plus a comment recording the numbers.
-- The remaining headroom problem is a design-token question, filed as **#22** rather than decided here.
+- The remaining headroom problem was a design-token question, filed as **#22** rather than decided here. **#22 has since landed** (§3, below).
+
+**3. `--destructive` had no headroom, and `/90` (and hover) fell under AA.**
+`--destructive` cleared AA by a hair at 4.77:1, so anything that dimmed it or
+composited it over a non-white surface dropped below the floor. This was not
+theoretical: two states were under AA before the token changed.
+
+- `text-destructive/90` over white: **4.54:1** (Chromium, Firefox), **4.496:1** (WebKit).
+- `hover:text-destructive` on the editor's Delete affordance, over the row's
+  hover background (`--accent`, not white): **4.375:1** in every engine — a real
+  failure on a state no earlier test measured.
+
+The owner approved the shade `oklch(0.550 0.240 27.325)`. Measured after the
+change, from the running app in all three engines:
+
+| state                                           | before                    | after                        |
+| ----------------------------------------------- | ------------------------- | ---------------------------- |
+| token on `--background` (white)                 | 4.77:1                    | **5.23:1**                   |
+| same colour at 90 % over white                  | 4.54:1 / 4.496:1 (WebKit) | **4.93:1 / 4.88:1 (WebKit)** |
+| `hover:text-destructive` over the hover surface | 4.375:1                   | **4.80:1**                   |
+| row menu's destructive item                     | 4.77:1                    | **5.23:1**                   |
+| save-error `Alert` title + description          | 4.77:1                    | **5.23:1**                   |
+
+- Change: one line in `src/routes/layout.css` (the light-mode block). `--destructive-foreground` and the dark-mode value were deliberately left alone — see the dark-mode limitation below.
+- Regression test: `tests/e2e/destructive-token.spec.ts`, in **every** project: full-strength ≥ 4.5:1, the `/90` composite ≥ 4.5:1, the alpha really is 0.9, the token paints the approved shade, and the rendered menu item plus the token over the hover surface clear AA. Negative control run: with the old value restored, **all 18 project-tests fail** (the `/90` case at 4.4963 in WebKit, the hover surface at 4.375 in every engine); with the approved value, 18/18 pass.
 
 ### Filed as issues
 
 **#22 — `--destructive` has almost no contrast headroom** ([issue](https://github.com/iariap/notes-app/issues/22)).
-The token clears AA at 4.77:1, so any `/90` modifier or non-white surface drops
-it under 4.5:1. Darkening the token changes the brand red, so it is an owner
-decision. Includes measured candidate values.
+The token cleared AA at 4.77:1, so any `/90` modifier or non-white surface
+dropped it under 4.5:1. Darkening the token changes the brand red, so it was an
+owner decision. Includes measured candidate values.
+
+**Status: fixed** (see §3, bug 3, for the measured before/after and the
+regression test). The owner approved `oklch(0.550 0.240 27.325)`.
 
 ### Recorded as known limitations (pre-existing, verified, **not** silently "fixed")
 
@@ -632,8 +661,12 @@ question automation cannot settle.
    **`main` push path is still unverified** — it only exists once these workflow
    files are on `main`, and no `main` run was made from this worktree by design.
 
-6. **`#22` (destructive token contrast) needs an owner decision** — darkening the
-   red is a brand change, not a QA fix.
+6. **`#22` (destructive token contrast) is resolved**, but **dark mode still
+   needs its own pass.** The light token was darkened to the owner-approved
+   `oklch(0.550 0.240 27.325)`; the dark-mode `--destructive` is untouched
+   (`oklch(0.704 0.191 22.216)`), unmeasured, and unreachable while no
+   `<ModeWatcher />` is mounted. Re-measure it — full strength and at `/90` — when
+   a toggle exists.
 
 7. **Dark mode cannot be QA'd end to end** while `<ModeWatcher />` is not
    mounted. The axe sweep runs in light mode only, which is the only mode the app

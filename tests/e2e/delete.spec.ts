@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { AA_NORMAL_TEXT, measureContrastOn } from './helpers/contrast';
 import { hasCoarsePointer, isNarrow, pressTab } from './helpers/keyboard';
 import { rowTitles, rows, seedNote, seedNotes, waitForList, type SeedNote } from './helpers/seed';
 
@@ -498,48 +499,13 @@ test.describe('accessibility', () => {
 		await page.getByRole('button', { name: 'Delete note' }).click();
 		await waitForToastSettled(page);
 
-		const contrast = await undoButton(page).evaluate((button) => {
-			/**
-			 * Resolves a computed colour to sRGB bytes through a canvas.
-			 *
-			 * The theme is authored in `oklch()`, and `getComputedStyle` returns it
-			 * verbatim — parsing it by hand would mean reimplementing the colour
-			 * conversion. Painting a pixel makes the browser do it, so the numbers
-			 * below are the ones a screenshot would show.
-			 */
-			const toRgb = (color: string): [number, number, number] => {
-				const canvas = document.createElement('canvas');
-				canvas.width = 1;
-				canvas.height = 1;
-				const context = canvas.getContext('2d');
-				if (context === null) throw new Error('2d canvas unavailable');
-				context.fillStyle = color;
-				context.fillRect(0, 0, 1, 1);
-				const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
-				return [r, g, b];
-			};
-			/** Relative luminance, per WCAG 2.x. */
-			const luminance = ([r, g, b]: [number, number, number]): number => {
-				const channel = (value: number): number => {
-					const scaled = value / 255;
-					return scaled <= 0.03928 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
-				};
-				return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-			};
+		// Measured the way every other contrast assertion in the repo is: the
+		// engine paints the colours and the pixel is read back, so `oklch()` and a
+		// translucent foreground are handled by the browser rather than by a
+		// reimplementation here (see `helpers/contrast.ts`, shared with #22).
+		const contrast = await measureContrastOn(page, undoButton(page));
 
-			const style = getComputedStyle(button);
-			const foreground = luminance(toRgb(style.color));
-			const background = luminance(toRgb(style.backgroundColor));
-			const lighter = Math.max(foreground, background);
-			const darker = Math.min(foreground, background);
-			return {
-				color: style.color,
-				background: style.backgroundColor,
-				ratio: (lighter + 0.05) / (darker + 0.05)
-			};
-		});
-
-		expect(contrast.ratio, JSON.stringify(contrast)).toBeGreaterThanOrEqual(4.5);
+		expect(contrast.ratio, JSON.stringify(contrast)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
 	});
 
 	/**
@@ -548,9 +514,10 @@ test.describe('accessibility', () => {
 	 * The same reason as `waitForToastSettled`, and the same remedy: the menu
 	 * fades in (`data-open:fade-in-0`), so while it animates its opacity is still
 	 * near zero and axe reports the item's colours as blended — a false
-	 * `color-contrast` violation. Measured at rest the Delete item is 4.77:1,
-	 * which clears AA. Scanning the settled state is what a user reads; nothing
-	 * about the rule is disabled.
+	 * `color-contrast` violation. Measured at rest the Delete item is 5.23:1
+	 * (4.77:1 before #22 darkened the token — it cleared AA both ways; the wait
+	 * is about the animation, not the shade). Scanning the settled state is what
+	 * a user reads; nothing about the rule is disabled.
 	 */
 	async function waitForMenuSettled(page: Page): Promise<void> {
 		await expect
