@@ -1,8 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
 	coldLoadToReady,
+	describeRender,
 	describeSamples,
+	expectRenderWithinBudget,
 	installListReadyProbe,
+	measureRender,
 	median
 } from './helpers/list-perf';
 import { withPerfBenchmarkLock } from './helpers/perf-lock';
@@ -11,31 +14,47 @@ import { seedNote, seedNotes } from './helpers/seed';
 /**
  * Issue #6, step 4: the list must stay responsive with 1,000 notes.
  *
- * ## What is gated, and why never an absolute number
+ * ## What is gated, and why it is a ratio
  *
  * The claim under test is relative: "1,000 notes do not cost more than the
  * list is allowed to cost". An absolute wall-clock budget measures the machine
  * as much as the code, so on a shared CI runner it is a permanent source of
  * red: the same list measured 90–230 ms per cold load locally while a raw load
- * under contention hit 503 ms. Loosening the constant until it passes would
- * leave a gate that no longer means anything.
+ * under contention hit 503 ms.
  *
- * So each number below is a **delta against a control measured on the same
- * machine, in the same run, on the same page**:
+ * The first two versions of this gate used a **difference** against a control
+ * measured on the same machine, in the same run, on the same page:
+ * `seeded − empty`. That cancels the constant cost (bundle download, parse,
+ * hydration, shell) but it does **not** cancel the variable one: rendering 1,000
+ * rows is CPU work, so a slower machine grows the difference while the part that
+ * cancels stays put. Measured across four machine speeds, the difference gate
+ * quietly permitted only `1 + 500/empty` — a permitted ratio of 21.0 on a fast
+ * machine and 3.96 under throttling — while the app's real ratio stayed near 4.9.
+ * It was a floor on runner speed disguised as a test of the app.
  *
- * - first render: `1,000 rows` minus `empty list` — the bundle download, parse,
- * hydration and shell are paid identically by both and cancel exactly.
+ * So the render gate is now the **ratio**: `seededMedian / emptyMedian` against
+ * `RENDER_RATIO_BUDGET` (7.5). The property is a multiple — 1,000 rows cost about
+ * 5x the empty load on any machine — and the ratio is stable where the difference
+ * is not. See `tests/e2e/helpers/list-perf.ts` for the full measurement table.
+ *
+ * The absolute marginal is still printed, and still worth reading: it is how a
+ * human notices the *runner* drifting. It is not asserted.
+ *
+ * - first render: **ratio** `seeded / empty`, gated at < 7.5x.
  * - scrolling: longest frame while scrolling 1,000 rows minus longest frame
- *   while scrolling an empty list through the identical loop — the fixed cost
- *   of the loop and the runner's noise cancel the same way.
+ *   while scrolling an empty list through the identical loop. This one is still a
+ *   difference, and correctly so: both sides run the same fixed 30-step loop and
+ *   the measured frames are ~17 ms on every machine (18 ms empty → 17 ms seeded),
+ *   so there is no machine-speed term to cancel.
  *
- * And each side of every delta is the **median of `SAMPLES` cold loads**, so a
- * single GC pause or a noisy neighbour cannot fail the test while a genuine
- * regression still moves the median. The per-sample values are printed next to
- * the medians, so a report can quote the spread rather than one lucky number.
+ * And each side of every measurement is the **median of several cold loads**
+ * (9 empty, 5 seeded), so a single GC pause or a noisy neighbour cannot fail the
+ * test while a genuine regression still moves the median. The per-sample values
+ * are printed next to the medians, so a report can quote the spread rather than
+ * one lucky number.
  *
  * Measured this way the test is meaningful under parallel workers: contention
- * inflates both the control and the subject.
+ * inflates both the control and the subject, and the ratio absorbs it.
  *
  * ## The probe
  *
@@ -46,7 +65,8 @@ import { seedNote, seedNotes } from './helpers/seed';
  * in the middle of the render it measures. Its target ("empty state" or "N
  * rows") is read from `sessionStorage` at document start, so one init script
  * serves every load with the right target instead of stacking scripts that
- * would race each other for the same global.
+ * would race each other for the same global. Both sides tick the same shape of
+ * check, so the probe's own cost is identical on each side of the ratio.
  *
  * ## Why there is no windowing
  *
@@ -65,8 +85,19 @@ const NOTE_COUNT_LABEL = NOTE_COUNT.toLocaleString('en-US');
 const RENDER_SAMPLES = 5;
 const SCROLL_SAMPLES = 3;
 
-/** Marginal cost of 1,000 rows over the same page's empty baseline. */
-const FIRST_RENDER_BUDGET_MS = 500;
+/**
+ * Cold loads for the **empty** condition.
+ *
+ * Higher than the seeded side on purpose. The empty load is the cheap one
+ * (~25 ms locally, ~136 ms on the slow CI runner), so it is also the side whose
+ * sampling noise dominates the variance of the ratio — and since the ratio puts
+ * it in the *denominator*, noise there moves the gated number more than the same
+ * noise on the seeded side. Nine samples cut that variance roughly by half for
+ * about 0.2 s of extra runtime; the seeded side already costs an order of
+ * magnitude more per sample, so it stays at 5.
+ */
+const EMPTY_SAMPLES = 9;
+
 /** Marginal cost of the longest scroll frame over the empty baseline. */
 const SCROLL_FRAME_BUDGET_MS = 250;
 
@@ -121,7 +152,7 @@ test.describe('1,000 notes', () => {
 		'performance target is desktop Chromium'
 	);
 
-	test('1,000 notes add less than 500 ms to the first render', async ({ page }, testInfo) => {
+	test('1,000 notes render within the ratio budget', async ({ page }, testInfo) => {
 		test.setTimeout(PERF_TEST_TIMEOUT_MS);
 
 		// One of up to three concurrent copies of this benchmark (this file in
@@ -135,7 +166,7 @@ test.describe('1,000 notes', () => {
 
 			// Control: the identical cold load with an empty list.
 			await seedNotes(page, []);
-			for (let sample = 0; sample < RENDER_SAMPLES; sample += 1) {
+			for (let sample = 0; sample < EMPTY_SAMPLES; sample += 1) {
 				emptySamples.push(await coldLoadToReady(page, { kind: 'empty' }));
 			}
 
@@ -146,20 +177,16 @@ test.describe('1,000 notes', () => {
 			}
 		});
 
-		const empty = median(emptySamples);
-		const seeded = median(seededSamples);
-		const marginal = Math.round(seeded - empty);
+		const measurement = measureRender(emptySamples, seededSamples);
 
-		const description =
-			`${NOTE_COUNT_LABEL} notes: marginal ${marginal} ms — ${describeSamples(
-				'empty',
-				emptySamples
-			)} → ${describeSamples('seeded', seededSamples)}, both from document start, ` +
-			`${RENDER_SAMPLES} cold loads each`;
+		const description = `${NOTE_COUNT_LABEL} notes: ${describeRender(
+			measurement,
+			`${EMPTY_SAMPLES} empty + ${RENDER_SAMPLES} seeded cold loads from document start`
+		)} — ${describeSamples('empty', emptySamples)} → ${describeSamples('seeded', seededSamples)}`;
 		testInfo.annotations.push({ type: 'perf:first-render', description });
 		console.log(`[perf] ${description}`);
 
-		expect(marginal).toBeLessThan(FIRST_RENDER_BUDGET_MS);
+		expectRenderWithinBudget(measurement);
 	});
 
 	test('scrolling 1,000 notes does not block the main thread', async ({ page }, testInfo) => {

@@ -361,12 +361,19 @@ the _same_ methodology, because #11 asks it to measure performance and a recorde
 number nobody can fail is a number nobody maintains — but it does so through one
 shared helper (`tests/e2e/helpers/list-perf.ts`), so the two can never drift.
 
-| metric                              | basis                                                                                 | samples             | target         | status                                |
-| ----------------------------------- | ------------------------------------------------------------------------------------- | ------------------- | -------------- | ------------------------------------- |
-| **1,000 notes — list first render** | marginal delta, **median-to-median**, both cold loads from document start             | **5 per condition** | delta < 500 ms | **GATED** (both specs, same helper)   |
-| **typing in a 10,000-char note**    | p95 per-keystroke cost on the page clock; control = identical typing in an empty note | 40 keystrokes each  | p95 < 40 ms    | **GATED**                             |
-| **repeat-visit first paint**        | absolute FCP after the service worker is warm                                         | 3                   | < 1,000 ms     | **RECORDED only**                     |
-| scrolling 1,000 notes               | longest scroll frame delta vs an empty list                                           | 3 each              | delta < 250 ms | **GATED** (`notes-list-perf.spec.ts`) |
+| metric                              | basis                                                                                 | samples                | target           | status                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- | ---------------- | --------------------------------------- |
+| **1,000 notes — list first render** | **ratio** `seededMedian / emptyMedian`, both cold loads from document start           | **9 empty + 5 seeded** | **ratio < 7.5x** | **GATED** (both specs, same helper)     |
+| **typing in a 10,000-char note**    | p95 per-keystroke cost on the page clock; control = identical typing in an empty note | 40 keystrokes each     | p95 < 40 ms      | **GATED**                               |
+| **repeat-visit first paint**        | absolute FCP after the service worker is warm                                         | 3                      | < 1,000 ms       | **RECORDED only**                       |
+| scrolling 1,000 notes               | longest scroll frame delta vs an empty list                                           | 3 each                 | delta < 250 ms   | **GATED** (`notes-list-perf.spec.ts`)   |
+| 1,000-note absolute marginal        | `seededMedian − emptyMedian`                                                          | 9 empty + 5 seeded     | —                | **RECORDED only** (runner-drift signal) |
+
+The render gate is a **ratio**, not a difference. `seeded − empty < 500 ms` was the
+gate until the difference was measured to be a hidden floor on runner speed — see
+"why the gate is a ratio" below. The absolute marginal is still printed on every
+run and worth reading: it is how a human notices the _runner_ drifting. Nothing
+asserts it.
 
 ### Measured numbers
 
@@ -389,12 +396,12 @@ On the **real CI runner** (much slower) the same property measured a marginal of
 
 ### Which are gated and why
 
-- **Gated — first render.** The gate is the _delta_ against an empty list measured
-  on the same machine in the same run: an absolute number measures the runner.
-  Both sides are the **median of 5 cold loads**, so one GC pause or one noisy
-  neighbour cannot fail the gate while a genuine regression still moves the
-  median. Absolute readings are printed and attached too, so a report can quote
-  both.
+- **Gated — first render.** The gate is the **ratio** `seeded / empty`, both sides
+  the median of cold loads measured on the same machine in the same run (9 empty,
+  5 seeded). The empty side gets more samples because it is the cheap one and sits
+  in the _denominator_, where its noise moves the gated number most.
+- **Recorded — the absolute marginal.** `seeded − empty` is printed and attached on
+  every run. It is how a human sees the runner drifting; it gates nothing.
 - **Gated — typing.** The control types the same number of characters into an
   empty note, so the constant cost of Playwright's own input dispatch cancels.
 - **Recorded — first paint.** Deliberately _not_ gated: the epic's "< 1 s" is
@@ -446,6 +453,47 @@ On the **real CI runner** (much slower) the same property measured a marginal of
    500 ms budget was **not** raised. Verified with a negative control: setting
    the budget to 1 ms makes both specs fail (`Received: 89` / `93` against
    `Expected: < 1`).
+
+### Why the render gate is a ratio and not a difference
+
+A 500 ms gate on `seeded − empty` looks machine-independent and is not. It permits
+only `1 + 500/empty` as a ratio, so the permitted multiple moves with the runner
+while the app's real multiple stays put. Measured across four machine speeds (40
+samples):
+
+| empty baseline       | ratio the 500 ms gate permits | app's actual ratio | verdict        |
+| -------------------- | ----------------------------- | ------------------ | -------------- |
+| 25 ms (local)        | 21.0                          | 4.56               | pass, 5x slack |
+| 95 ms                | 6.26                          | 4.87               | pass           |
+| 124 ms (CI)          | 5.03                          | 5.43               | **failed**     |
+| 136 ms (CI)          | 4.68                          | 4.87               | **failed**     |
+| 169 ms (6x throttle) | 3.96                          | 3.97               | **failed**     |
+
+Across all 40 measurements the ratio spans **3.20–6.86** (mean 4.88) with almost
+no real spread once n=5 noise is removed; the difference has ~27.5 % spread driven
+by machine speed. One run failed at 550 ms with ratio 5.43, another passed at
+441 ms with 5.64 — the verdict was the runner's, not the app's. The per-row render
+path was audited as well: ~5 ms of JS per 1,000 rows (title 0.72, preview 2.37,
+dates 1.08, validate 0.99) plus 9.6 ms of DOM growth since #6, so there was never
+a 400 ms regression to find.
+
+**`RENDER_RATIO_BUDGET = 7.5`** is 9 % above the highest ratio ever observed
+(6.86). It rejects a real regression of about 1.55x per-row cost, with roughly a
+2 % false-red rate at n=5.
+
+The ratio direction matters, and the two controls prove it:
+
+| scenario                                   | marginal   | old 500 ms gate | ratio | new 7.5x gate |
+| ------------------------------------------ | ---------- | --------------- | ----- | ------------- |
+| idle machine                               | 90 ms      | pass            | 5.00x | pass          |
+| 6x CPU throttle                            | **512 ms** | **FAIL**        | 4.40x | **pass**      |
+| 8x CPU throttle                            | **693 ms** | **FAIL**        | 4.57x | **pass**      |
+| idle machine + injected per-row regression | 183 ms     | **pass**        | 9.63x | **FAIL**      |
+
+The first two rows are the false red the old gate produced — a 693 ms marginal
+with the app untouched. The last row is the false green it also produced: a
+genuine 2x regression in per-row cost that stayed under 500 ms absolute, and which
+only the ratio caught.
 
 ### Concurrency: the benchmarks no longer overlap
 
@@ -605,54 +653,49 @@ question automation cannot settle.
     workflow added by a PR does not run for that PR's own label events. It needs
     one real label event _after_ this lands to be confirmed live.
 
-11. **The 1,000-note render gate: the overlap half is fixed; the machine-speed
-    half is inherent.** Recorded here with the measurements, because the two were
-    initially conflated and only one of them is a defect.
+11. **The 1,000-note render gate had three defects; all three are fixed.** Kept in
+    the record because each one masked the next, and each is something a reader
+    would otherwise be tempted to re-introduce.
 
-    **Overlap — fixed.** With `fullyParallel: true` up to three 1,000-note
-    benchmarks ran concurrently: `notes-list-perf.spec.ts` in `desktop` and
-    `tablet`, plus `acceptance/performance.spec.ts` in `desktop`. A seeded render
-    costs ~3× the CPU of an empty one, so overlapping benchmarks inflate the
-    seeded side more than the empty side, and a subtractive delta cannot cancel
-    that. Both files now take a **cross-process file lock** around the benchmark
-    (`tests/e2e/helpers/perf-lock.ts`), so only one measures at a time.
+    **1. The probe was installed twice, and n=3 was too few.** `addInitScript`
+    accumulates, so the control-phase `'empty'` probe kept spinning during every
+    measured seeded load (24 extra DOM queries per load, ~4 % of seeded time), and
+    the median of 3 is decided by a single order statistic — replaying every
+    3-subset of the passing spec's own samples moved the verdict across a 126 ms
+    range on identical data. Fixed with one shared probe
+    (`tests/e2e/helpers/list-perf.ts`) and more samples.
 
+    **2. The benchmarks overlapped.** With `fullyParallel: true` up to three
+    1,000-note benchmarks ran at once (`notes-list-perf.spec.ts` in `desktop` and
+    `tablet`, plus `acceptance/performance.spec.ts` in `desktop`). A seeded render
+    costs ~3× the CPU of an empty one, so overlap inflates the seeded side more
+    than the empty side. Fixed with a **cross-process file lock**
+    (`tests/e2e/helpers/perf-lock.ts`): a directory created with a non-recursive
+    `mkdir` (atomic on POSIX and Windows), holding the owner's pid for diagnostics
+    and reclaimed when stale. Verified to exclude 36 acquisitions across 6 projects
+    and distinct OS processes with zero overlap, at **no measurable cost** (full
+    matrix 192 s before, 186 s and 188 s after).
     `test.describe.configure({ mode: 'serial' })` was rejected because it orders
-    tests **within one file, one project, one worker** — it cannot stop the
-    `desktop` copy of one file overlapping the `tablet` copy of another, which is
-    exactly the shape of the CI failures (desktop red while tablet passed in the
-    same run). It would also skip the scrolling benchmark whenever the render
-    benchmark failed, hiding an independent property. The lock is a directory
-    created with a non-recursive `mkdir` (atomic on POSIX and Windows), holding
-    the owner's pid for diagnostics and reclaimed if stale; it was verified to
-    exclude 36 acquisitions across 6 projects and distinct OS processes with zero
-    overlap. Measured cost: **none** — full matrix 192 s before, 186 s and 188 s
-    after.
+    tests **within one file, one project, one worker** and cannot stop the
+    `desktop` copy of one file overlapping the `tablet` copy of another — exactly
+    the shape of the CI failures. It would also skip the scroll benchmark whenever
+    the render benchmark failed.
 
-    **Machine speed — inherent, not fixed here.** Serialised on one worker with no
-    contention at all, the marginal still scales with CPU throttle rate:
+    **3. The gate was a difference, so it was a floor on runner speed.**
+    `seeded − empty < 500 ms` permits only `1 + 500/empty` as a ratio, so the
+    allowed multiple moved with the machine (21.0 on a fast one, 3.96 under
+    throttling) while the app's real multiple stayed near 4.9. **This is now fixed
+    by gating the ratio** (`RENDER_RATIO_BUDGET = 7.5`, 9 empty + 5 seeded samples)
+    in both specs via the shared helper. The absolute marginal is still printed on
+    every run as a runner-drift signal; nothing asserts it. See §5 for the
+    measurement table and the two controls.
 
-    | throttle | empty median | seeded median | marginal   |
-    | -------- | ------------ | ------------- | ---------- |
-    | 1×       | 25 ms        | 114 ms        | **89 ms**  |
-    | 2×       | 58 ms        | 222 ms        | **164 ms** |
-    | 3×       | 77 ms        | 333 ms        | **256 ms** |
-    | 4×       | 98 ms        | 451 ms        | **353 ms** |
-    | 6×       | 169 ms       | 671 ms        | **502 ms** |
-
-    Rendering 1,000 rows is CPU work, so a slower machine multiplies it while the
-    shared shell cost — the part that is supposed to cancel — does not shrink with
-    it. **The 500 ms budget is therefore also an implicit floor on runner speed.**
-    The CI runner's empty median was 136 ms against 25 ms locally (≈5.4×), which
-    is the 6× row, i.e. right at the budget. The lock removes the measurement
-    defect; it cannot make a slow CPU fast.
-
-    If a `main` run still shows the marginal drifting to 500 ms _with the lock in
-    place_, the honest response is to re-derive the budget and the sample count
-    together against measured runner speed — not to raise the number alone, and
-    not to lower the sample count. That decision is deliberately left to a human
-    with the `main` numbers in hand; nothing was relaxed here (budgets, sample
-    counts and every assertion are byte-identical to the previous state).
+    **What is deliberately not done:** the 7.5 budget was not tuned to this
+    machine. It is set 9 % above the highest ratio observed across all four
+    machine speeds (6.86), so it should hold on a runner slower than any measured
+    so far — the ratio is stable where the difference was not. If a `main` run
+    ever reports a ratio near 7.5, that is a real per-row regression and should be
+    investigated as one, not answered by raising the constant.
 
 12. **The `AC4` persistence test was patching the wrong object (fixed).** It
     failed only in `desktop-webkit` and only under parallel load (5 of 6 runs at
