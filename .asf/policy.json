@@ -76,9 +76,10 @@
 			"reason": "CI and automation"
 		},
 		{
-			"pattern": ".factory/**",
+			"pattern": ".asf/**",
+			"except": [".asf/specs/*.md"],
 			"risk": "high",
-			"reason": "Factory metadata (never low, enforced by the factory anyway)"
+			"reason": "ASF settings (never low, enforced by the harness anyway); run specs .asf/specs/*.md stay docs"
 		}
 	]
 }
